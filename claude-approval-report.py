@@ -8,7 +8,7 @@ import os
 import re
 import sys
 from collections import defaultdict, Counter
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from fnmatch import fnmatch
 
@@ -689,9 +689,93 @@ def suggest_pattern(display):
 
 # --- Main ---
 
-def default_output_path():
-    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H%M%SZ")
-    return f"claude-approval-report-{ts}.txt"
+def parse_time_filter(value):
+    """Parse --since value. Accepts ISO date (2026-05-01) or relative (7d, 2w, 1m)."""
+    # Relative: 7d, 2w, 1m
+    m = re.match(r'^(\d+)([dwm])$', value)
+    if m:
+        num = int(m.group(1))
+        unit = m.group(2)
+        now = datetime.now(timezone.utc)
+        if unit == "d":
+            cutoff = now - timedelta(days=num)
+        elif unit == "w":
+            cutoff = now - timedelta(weeks=num)
+        elif unit == "m":
+            cutoff = now - timedelta(days=num * 30)
+        return cutoff
+
+    # ISO date
+    try:
+        dt = datetime.fromisoformat(value)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except ValueError:
+        print(f"Error: invalid time filter '{value}'. Use ISO date (2026-05-01) or relative (7d, 2w, 1m).")
+        sys.exit(1)
+
+
+def filter_records(records, since=None, project=None):
+    """Filter records by time and/or project."""
+    if since:
+        cutoff_str = since.isoformat()
+        records = [r for r in records if r["timestamp"] >= cutoff_str]
+    if project:
+        home_slug = "-" + str(Path.home()).lstrip("/").replace("/", "-")
+        full_name = home_slug + "-" + project
+        records = [r for r in records if r["project"] == full_name]
+    return records
+
+
+def render_json(all_records, out=None):
+    """Render the analysis as JSON."""
+    if out is None:
+        out = sys.stdout
+
+    total = len(all_records)
+    auto = [r for r in all_records if r["auto_allowed"]]
+    prompted = [r for r in all_records if not r["auto_allowed"] and not r["rejected"]]
+    rejected = [r for r in all_records if r["rejected"]]
+
+    prompt_counts = Counter(r["display"] for r in prompted)
+    reject_counts = Counter(r["display"] for r in rejected)
+    risk_counts = Counter(r["risk"] for r in all_records)
+    tool_counts = Counter(r["tool_name"] for r in prompted)
+
+    home_slug = "-" + str(Path.home()).lstrip("/").replace("/", "-")
+    projects = {}
+    for proj in sorted(set(r["project"] for r in all_records)):
+        proj_records = [r for r in all_records if r["project"] == proj]
+        if proj == home_slug:
+            proj_short = "(home)"
+        elif proj.startswith(home_slug + "-"):
+            proj_short = proj[len(home_slug) + 1:]
+        else:
+            proj_short = proj
+        projects[proj_short] = {
+            "total": len(proj_records),
+            "auto_allowed": sum(1 for r in proj_records if r["auto_allowed"]),
+            "prompted": sum(1 for r in proj_records if not r["auto_allowed"] and not r["rejected"]),
+            "rejected": sum(1 for r in proj_records if r["rejected"]),
+        }
+
+    report = {
+        "summary": {
+            "total": total,
+            "auto_allowed": len(auto),
+            "prompted": len(prompted),
+            "rejected": len(rejected),
+        },
+        "risk": {level: risk_counts.get(level, 0) for level in ["destructive", "mutating", "read-only", "unknown"]},
+        "most_prompted": [{"command": cmd, "count": n} for cmd, n in prompt_counts.most_common(25)],
+        "most_rejected": [{"command": cmd, "count": n} for cmd, n in reject_counts.most_common(15)],
+        "tool_types": {tool: n for tool, n in tool_counts.most_common()},
+        "projects": projects,
+    }
+
+    json.dump(report, out, indent=2)
+    out.write("\n")
 
 
 def main():
@@ -704,9 +788,27 @@ def main():
         help="Write report to file. No value = auto-named ISO 8601 file in current directory. "
              "Or pass a path explicitly.",
     )
+    parser.add_argument(
+        "--since",
+        default=None,
+        help="Only include records after this time. ISO date (2026-05-01) or relative (7d, 2w, 1m).",
+    )
+    parser.add_argument(
+        "--project",
+        default=None,
+        help="Filter to a single project by name (e.g. 'laima', 'vsdx-forge').",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        default=False,
+        help="Output as JSON instead of text tables.",
+    )
     args = parser.parse_args()
 
-    print("Scanning Claude Code session data...\n")
+    since = parse_time_filter(args.since) if args.since else None
+
+    print("Scanning Claude Code session data...", file=sys.stderr)
 
     global_settings = load_global_settings()
     global_allow = global_settings.get("permissions", {}).get("allow", [])
@@ -728,22 +830,36 @@ def main():
             records = process_session(str(jsonl_file), combined_allow, project_name)
             all_records.extend(records)
 
+    all_records = filter_records(all_records, since=since, project=args.project)
+
     if not all_records:
-        print("No tool call data found.")
+        print("No tool call data found.", file=sys.stderr)
         sys.exit(1)
 
+    if args.since or args.project:
+        filters = []
+        if args.since:
+            filters.append(f"since {args.since}")
+        if args.project:
+            filters.append(f"project={args.project}")
+        print(f"Filters: {', '.join(filters)}", file=sys.stderr)
+
+    renderer = render_json if args.json else render_report
+
     if args.output is None:
-        render_report(all_records)
+        renderer(all_records)
     else:
         if args.output == "auto":
-            out_path = default_output_path()
+            ext = ".json" if args.json else ".txt"
+            out_path = f"claude-approval-report-{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H%M%SZ')}{ext}"
         elif os.path.isdir(args.output):
-            out_path = os.path.join(args.output, default_output_path())
+            ext = ".json" if args.json else ".txt"
+            out_path = os.path.join(args.output, f"claude-approval-report-{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H%M%SZ')}{ext}")
         else:
             out_path = args.output
         with open(out_path, "w") as f:
-            render_report(all_records, out=f)
-        print(f"Report written to {out_path}")
+            renderer(all_records, out=f)
+        print(f"Report written to {out_path}", file=sys.stderr)
 
 
 if __name__ == "__main__":
