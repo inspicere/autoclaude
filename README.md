@@ -56,6 +56,24 @@ python3 claude-approval-report.py --since 2w --project laima
 
 The `--since` flag accepts relative times (`7d`, `2w`, `1m`) or ISO dates (`2026-05-01`).
 
+### Applying suggestions
+
+```
+# Preview what would be added (dry run)
+python3 claude-approval-report.py --apply --dry-run
+
+# Apply read-only suggestions to settings.local.json files
+python3 claude-approval-report.py --apply
+
+# Also apply mutating suggestions (never applies destructive)
+python3 claude-approval-report.py --apply mutating
+
+# Combine with filters
+python3 claude-approval-report.py --apply --since 7d --project laima --dry-run
+```
+
+The `--apply` flag writes frequently-approved patterns directly to each project's `.claude/settings.local.json`. By default only read-only commands are applied. Destructive patterns are never auto-applied.
+
 ### JSON output
 
 ```

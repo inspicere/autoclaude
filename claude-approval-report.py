@@ -198,20 +198,8 @@ def load_project_settings(project_name):
         except (json.JSONDecodeError, KeyError):
             pass
 
-    # Derive the source directory path from project name
-    # Project names encode paths: /home/user/myproject -> -home-user-myproject
-    # Use home dir to find the reliable split point, then treat the remainder
-    # as the project directory name (which may contain hyphens)
-    home_slug = "-" + str(Path.home()).lstrip("/").replace("/", "-")
-    if project_name.startswith(home_slug + "-"):
-        project_subdir = project_name[len(home_slug) + 1:]
-        source_dir = str(Path.home() / project_subdir)
-    elif project_name == home_slug:
-        source_dir = str(Path.home())
-    else:
-        source_dir = "/" + project_name.lstrip("-").replace("-", "/")
-
-    settings_local = Path(source_dir) / ".claude" / "settings.local.json"
+    settings_path = project_settings_path(project_name)
+    settings_local = settings_path if settings_path else Path("/nonexistent")
     if settings_local.exists():
         try:
             with open(settings_local) as f:
@@ -551,27 +539,7 @@ def render_report(all_records, out=None):
     _print("  Frequently approved commands that could be auto-allowed")
     _print("=" * 70)
 
-    # Group by project and command pattern, tracking risk
-    by_project = defaultdict(lambda: Counter())
-    risk_by_key = defaultdict(lambda: Counter())
-    for r in prompted:
-        key = (r["project"], r["display"])
-        by_project[r["project"]][r["display"]] += 1
-        risk_by_key[key][r["risk"]] += 1
-
-    suggestions = []
-    skip_patterns = {"(comment/shebang)", "(empty)"}
-    for project, counts in by_project.items():
-        for cmd, count in counts.most_common():
-            if count >= 3:
-                cmd_suffix = cmd.split(": ", 1)[1] if ": " in cmd else cmd
-                if cmd_suffix in skip_patterns:
-                    continue
-                pattern = suggest_pattern(cmd)
-                risk = risk_by_key[(project, cmd)].most_common(1)[0][0]
-                suggestions.append((count, project, cmd, pattern, risk))
-
-    suggestions.sort(key=lambda x: -x[0])
+    suggestions = build_suggestions(all_records)
 
     _print(f"  {'Count':<8} {'Risk':<14} {'Project':<18} {'Suggested Pattern'}")
     _print(f"  {'-----':<8} {'----':<14} {'-------':<18} {'-----------------'}")
@@ -662,10 +630,9 @@ def render_report(all_records, out=None):
 
 
 def suggest_pattern(display):
-    """Suggest an allowlist pattern from a display string."""
+    """Suggest an allowlist pattern from a display string. Returns a display string (may contain 'or')."""
     if display.startswith("Bash: "):
         cmd = display[6:]
-        # For ssh, suggest a host-scoped pattern
         m = re.match(r'^ssh ([\d.]+)$', cmd)
         if m:
             return f"Bash(ssh *@{m.group(1)} *) or Bash(ssh {m.group(1)} *)"
@@ -689,6 +656,153 @@ def suggest_pattern(display):
     elif display.startswith("WebFetch"):
         return display.replace("WebFetch: ", "WebFetch(url:") + ")"
     return display
+
+
+def suggest_pattern_applicable(display):
+    """Return a single pattern suitable for writing to settings.local.json."""
+    pattern = suggest_pattern(display)
+    # For compound suggestions, pick the simpler one
+    if " or " in pattern:
+        pattern = pattern.split(" or ")[1]
+    return pattern
+
+
+def build_suggestions(all_records):
+    """Build the list of allowlist suggestions from prompted records.
+
+    Returns list of (count, project_name, display, pattern, risk) tuples.
+    """
+    prompted = [r for r in all_records if not r["auto_allowed"] and not r["rejected"]]
+
+    by_project = defaultdict(lambda: Counter())
+    risk_by_key = defaultdict(lambda: Counter())
+    for r in prompted:
+        key = (r["project"], r["display"])
+        by_project[r["project"]][r["display"]] += 1
+        risk_by_key[key][r["risk"]] += 1
+
+    suggestions = []
+    skip_patterns = {"(comment/shebang)", "(empty)"}
+    for project, counts in by_project.items():
+        for cmd, count in counts.most_common():
+            if count >= 3:
+                cmd_suffix = cmd.split(": ", 1)[1] if ": " in cmd else cmd
+                if cmd_suffix in skip_patterns:
+                    continue
+                pattern = suggest_pattern(cmd)
+                risk = risk_by_key[(project, cmd)].most_common(1)[0][0]
+                suggestions.append((count, project, cmd, pattern, risk))
+
+    suggestions.sort(key=lambda x: -x[0])
+    return suggestions
+
+
+def project_settings_path(project_name):
+    """Get the settings.local.json path for a project.
+
+    Falls back to scanning home directory if the slug doesn't resolve
+    (e.g. dots in directory names become dashes in the slug).
+    """
+    home_slug = "-" + str(Path.home()).lstrip("/").replace("/", "-")
+    if project_name == home_slug:
+        return Path.home() / ".claude" / "settings.local.json"
+
+    if not project_name.startswith(home_slug + "-"):
+        return None
+
+    project_subdir = project_name[len(home_slug) + 1:]
+    candidate = Path.home() / project_subdir
+    if candidate.is_dir():
+        return candidate / ".claude" / "settings.local.json"
+
+    # Slug doesn't map directly — scan home for dirs whose slugified name matches
+    for entry in Path.home().iterdir():
+        if not entry.is_dir() or entry.name.startswith("."):
+            continue
+        if entry.name.replace(".", "-") == project_subdir:
+            return entry / ".claude" / "settings.local.json"
+
+    return None
+
+
+def apply_suggestions(all_records, risk_level="read-only", dry_run=False):
+    """Apply suggested allowlist patterns to project settings.local.json files."""
+    suggestions = build_suggestions(all_records)
+
+    allowed_risks = {"read-only"}
+    if risk_level == "mutating":
+        allowed_risks.add("mutating")
+
+    # Group applicable suggestions by project
+    by_project = defaultdict(list)
+    for count, project, cmd, pattern, risk in suggestions:
+        if risk not in allowed_risks:
+            continue
+        applicable = suggest_pattern_applicable(cmd)
+        by_project[project].append((applicable, count, risk))
+
+    if not by_project:
+        print("No applicable suggestions found.", file=sys.stderr)
+        return
+
+    total_added = 0
+    for project, patterns in sorted(by_project.items()):
+        settings_path = project_settings_path(project)
+        if settings_path is None:
+            continue
+
+        # Load existing settings
+        if settings_path.exists():
+            try:
+                with open(settings_path) as f:
+                    settings = json.load(f)
+            except (json.JSONDecodeError, OSError):
+                settings = {}
+        else:
+            settings = {}
+
+        existing = set(settings.get("permissions", {}).get("allow", []))
+
+        new_patterns = []
+        for pattern, count, risk in patterns:
+            if pattern not in existing:
+                new_patterns.append((pattern, count, risk))
+
+        if not new_patterns:
+            continue
+
+        home_slug = "-" + str(Path.home()).lstrip("/").replace("/", "-")
+        if project == home_slug:
+            proj_short = "(home)"
+        elif project.startswith(home_slug + "-"):
+            proj_short = project[len(home_slug) + 1:]
+        else:
+            proj_short = project
+
+        print(f"\n  {proj_short}: {settings_path}", file=sys.stderr)
+        for pattern, count, risk in new_patterns:
+            print(f"    + {pattern}  ({count} approvals, {risk})", file=sys.stderr)
+
+        if not dry_run:
+            if "permissions" not in settings:
+                settings["permissions"] = {}
+            if "allow" not in settings["permissions"]:
+                settings["permissions"]["allow"] = []
+
+            for pattern, count, risk in new_patterns:
+                settings["permissions"]["allow"].append(pattern)
+
+            if not settings_path.parent.exists():
+                print(f"    Skipping: {settings_path.parent} does not exist", file=sys.stderr)
+                continue
+            with open(settings_path, "w") as f:
+                json.dump(settings, f, indent=2)
+                f.write("\n")
+
+        total_added += len(new_patterns)
+
+    action = "Would add" if dry_run else "Added"
+    print(f"\n  {action} {total_added} patterns across {len(by_project)} projects.", file=sys.stderr)
 
 
 # --- Main ---
@@ -808,6 +922,22 @@ def main():
         default=False,
         help="Output as JSON instead of text tables.",
     )
+    parser.add_argument(
+        "--apply",
+        nargs="?",
+        const="read-only",
+        default=None,
+        choices=["read-only", "mutating"],
+        help="Write suggested patterns to settings.local.json. "
+             "Default: only read-only commands. 'mutating' includes mutating too. "
+             "Never auto-applies destructive patterns.",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=False,
+        help="With --apply, show what would be added without writing.",
+    )
     args = parser.parse_args()
 
     since = parse_time_filter(args.since) if args.since else None
@@ -848,22 +978,25 @@ def main():
             filters.append(f"project={args.project}")
         print(f"Filters: {', '.join(filters)}", file=sys.stderr)
 
-    renderer = render_json if args.json else render_report
-
-    if args.output is None:
-        renderer(all_records)
+    if args.apply is not None:
+        apply_suggestions(all_records, risk_level=args.apply, dry_run=args.dry_run)
     else:
-        if args.output == "auto":
-            ext = ".json" if args.json else ".txt"
-            out_path = f"claude-approval-report-{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H%M%SZ')}{ext}"
-        elif os.path.isdir(args.output):
-            ext = ".json" if args.json else ".txt"
-            out_path = os.path.join(args.output, f"claude-approval-report-{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H%M%SZ')}{ext}")
+        renderer = render_json if args.json else render_report
+
+        if args.output is None:
+            renderer(all_records)
         else:
-            out_path = args.output
-        with open(out_path, "w") as f:
-            renderer(all_records, out=f)
-        print(f"Report written to {out_path}", file=sys.stderr)
+            if args.output == "auto":
+                ext = ".json" if args.json else ".txt"
+                out_path = f"claude-approval-report-{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H%M%SZ')}{ext}"
+            elif os.path.isdir(args.output):
+                ext = ".json" if args.json else ".txt"
+                out_path = os.path.join(args.output, f"claude-approval-report-{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H%M%SZ')}{ext}")
+            else:
+                out_path = args.output
+            with open(out_path, "w") as f:
+                renderer(all_records, out=f)
+            print(f"Report written to {out_path}", file=sys.stderr)
 
 
 if __name__ == "__main__":
