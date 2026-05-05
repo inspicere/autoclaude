@@ -39,13 +39,17 @@ def load_project_settings(project_name):
             pass
 
     # Derive the source directory path from project name
-    # e.g. "-home-terrabot-laima" -> "/home/terrabot/laima"
-    source_dir = project_name.replace("-", "/", 3)  # rough heuristic
-    # Better: reconstruct from segments
-    parts = project_name.lstrip("-").split("-")
-    # Rebuild path: first segment is empty (leading -), rest are path components
-    # "-home-terrabot-laima" -> ["home", "terrabot", "laima"]
-    source_dir = "/" + "/".join(parts)
+    # Project names encode paths: /home/user/myproject -> -home-user-myproject
+    # Use home dir to find the reliable split point, then treat the remainder
+    # as the project directory name (which may contain hyphens)
+    home_slug = "-" + str(Path.home()).lstrip("/").replace("/", "-")
+    if project_name.startswith(home_slug + "-"):
+        project_subdir = project_name[len(home_slug) + 1:]
+        source_dir = str(Path.home() / project_subdir)
+    elif project_name == home_slug:
+        source_dir = str(Path.home())
+    else:
+        source_dir = "/" + project_name.lstrip("-").replace("-", "/")
 
     settings_local = Path(source_dir) / ".claude" / "settings.local.json"
     if settings_local.exists():
@@ -423,7 +427,15 @@ def render_report(all_records, out=None):
         p_auto = sum(1 for r in proj_records if r["auto_allowed"])
         p_prompted = sum(1 for r in proj_records if not r["auto_allowed"] and not r["rejected"])
         p_rejected = sum(1 for r in proj_records if r["rejected"])
-        proj_short = proj.replace("-home-terrabot-", "").replace("-home-terrabot", "(home)")
+        # Strip the home dir prefix from project names for display
+        # Project names encode paths: /home/terrabot/laima -> -home-terrabot-laima
+        home_slug = "-" + str(Path.home()).lstrip("/").replace("/", "-")
+        if proj == home_slug:
+            proj_short = "(home)"
+        elif proj.startswith(home_slug + "-"):
+            proj_short = proj[len(home_slug) + 1:]
+        else:
+            proj_short = proj
         _print(f"  {proj_short:<35} {len(proj_records):>8} {p_auto:>8} {p_prompted:>8} {p_rejected:>8}")
     _print()
 
