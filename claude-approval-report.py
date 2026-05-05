@@ -3,7 +3,6 @@
 
 import argparse
 import json
-import glob
 import os
 import re
 import sys
@@ -14,6 +13,20 @@ from fnmatch import fnmatch
 
 CLAUDE_DIR = Path.home() / ".claude"
 PROJECTS_DIR = CLAUDE_DIR / "projects"
+HOME_SLUG = "-" + str(Path.home()).lstrip("/").replace("/", "-")
+
+_RE_CD_PREFIX = re.compile(r'^(cd\s+(?:\S+|"[^"]*"|\'[^\']*\')\s*&&\s*)+')
+_RE_ENV_PREFIX = re.compile(r'^(\w+=(?:\S+|"[^"]*"|\'[^\']*\')\s+)+')
+_RE_SHELL_OPS = re.compile(r'^[&|;]+\s*')
+
+
+def short_project_name(project):
+    """Convert a project slug to a human-readable short name."""
+    if project == HOME_SLUG:
+        return "(home)"
+    if project.startswith(HOME_SLUG + "-"):
+        return project[len(HOME_SLUG) + 1:]
+    return project
 
 # --- Risk classification ---
 
@@ -108,10 +121,9 @@ def classify_risk(tool_name, tool_input):
     """Classify a tool call as destructive/mutating/read-only."""
     if tool_name == "Bash":
         cmd = tool_input.get("command", "").strip()
-        cmd = re.sub(r'^cd\s+\S+\s*&&\s*', '', cmd)
-        cmd = re.sub(r'^(\w+=\S+\s+)+', '', cmd)
-        # Strip leading shell operators from compound commands
-        cmd = re.sub(r'^[&|;]+\s*', '', cmd)
+        cmd = _RE_CD_PREFIX.sub('', cmd)
+        cmd = _RE_ENV_PREFIX.sub('', cmd)
+        cmd = _RE_SHELL_OPS.sub('', cmd)
         parts = cmd.split()
         if not parts or parts[0].startswith("#"):
             return "read-only"
@@ -196,7 +208,7 @@ def classify_risk(tool_name, tool_input):
         clean_base = base.strip("\"'^)")
         if len(clean_base) >= 40 and re.match(r'^[A-Za-z0-9+/=]+$', clean_base):
             return "destructive"
-        if re.search(r'(API_KEY|SECRET|TOKEN|PASSWORD|PRIVATE_KEY|CREDENTIAL)', clean_base.upper()):
+        if re.match(r'^[\w]*(API_KEY|_SECRET|_TOKEN|_PASSWORD|PRIVATE_KEY|CREDENTIAL)[\w]*$', clean_base.upper()):
             return "destructive"
         return "unknown"
 
@@ -323,10 +335,8 @@ def extract_tool_calls_from_assistant(content):
 def normalize_command(cmd):
     """Extract a groupable prefix from a bash command."""
     cmd = cmd.strip()
-    # Strip leading cd ... &&
-    cmd = re.sub(r'^cd\s+\S+\s*&&\s*', '', cmd)
-    # Strip leading env var assignments
-    cmd = re.sub(r'^(\w+=\S+\s+)+', '', cmd)
+    cmd = _RE_CD_PREFIX.sub('', cmd)
+    cmd = _RE_ENV_PREFIX.sub('', cmd)
     # Get the base command (first word or two)
     parts = cmd.split()
     if not parts:
@@ -402,7 +412,7 @@ def get_tool_display(tool_name, tool_input):
 def get_tool_full_command(tool_name, tool_input):
     """Get the full command string for detailed display."""
     if tool_name == "Bash":
-        return tool_input.get("command", "")[:150]
+        return tool_input.get("command", "")[:300]
     elif tool_name in ("Read", "Write", "Edit"):
         return tool_input.get("file_path", "")
     return ""
@@ -418,24 +428,19 @@ def process_session(jsonl_path, allow_patterns, project_name):
     except Exception:
         return records
 
-    # Index assistant messages by UUID for lookup
-    assistant_by_uuid = {}
+    objects = []
     for line in lines:
         try:
-            obj = json.loads(line)
+            objects.append(json.loads(line))
         except json.JSONDecodeError:
             continue
 
+    assistant_by_uuid = {}
+    for obj in objects:
         if obj.get("type") == "assistant":
             assistant_by_uuid[obj.get("uuid")] = obj
 
-    # Process user records that have tool results
-    for line in lines:
-        try:
-            obj = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-
+    for obj in objects:
         if obj.get("type") != "user":
             continue
 
@@ -603,8 +608,7 @@ def render_report(all_records, out=None):
     _print(f"  {'Count':<8} {'Risk':<14} {'Project':<18} {'Suggested Pattern'}")
     _print(f"  {'-----':<8} {'----':<14} {'-------':<18} {'-----------------'}")
     for count, project, cmd, pattern, risk in suggestions[:20]:
-        proj_short = project.split("-")[-1] if "-" in project else project
-        _print(f"  {count:<8} {risk:<14} {proj_short:<18} {pattern}")
+        _print(f"  {count:<8} {risk:<14} {short_project_name(project):<18} {pattern}")
     _print()
 
     # --- Risk breakdown ---
@@ -662,16 +666,7 @@ def render_report(all_records, out=None):
         p_auto = sum(1 for r in proj_records if r["auto_allowed"])
         p_prompted = sum(1 for r in proj_records if not r["auto_allowed"] and not r["rejected"])
         p_rejected = sum(1 for r in proj_records if r["rejected"])
-        # Strip the home dir prefix from project names for display
-        # Project names encode paths: /home/terrabot/laima -> -home-terrabot-laima
-        home_slug = "-" + str(Path.home()).lstrip("/").replace("/", "-")
-        if proj == home_slug:
-            proj_short = "(home)"
-        elif proj.startswith(home_slug + "-"):
-            proj_short = proj[len(home_slug) + 1:]
-        else:
-            proj_short = proj
-        _print(f"  {proj_short:<35} {len(proj_records):>8} {p_auto:>8} {p_prompted:>8} {p_rejected:>8}")
+        _print(f"  {short_project_name(proj):<35} {len(proj_records):>8} {p_auto:>8} {p_prompted:>8} {p_rejected:>8}")
     _print()
 
     # --- Tool type breakdown ---
@@ -718,11 +713,12 @@ def suggest_pattern(display):
 
 
 def suggest_pattern_applicable(display):
-    """Return a single pattern suitable for writing to settings.local.json."""
+    """Return a single pattern suitable for writing to settings.local.json, or None if invalid."""
     pattern = suggest_pattern(display)
-    # For compound suggestions, pick the simpler one
     if " or " in pattern:
         pattern = pattern.split(" or ")[1]
+    if not re.match(r'^[\w]+(\(.*\))?$', pattern):
+        return None
     return pattern
 
 
@@ -762,14 +758,13 @@ def project_settings_path(project_name):
     Falls back to scanning home directory if the slug doesn't resolve
     (e.g. dots in directory names become dashes in the slug).
     """
-    home_slug = "-" + str(Path.home()).lstrip("/").replace("/", "-")
-    if project_name == home_slug:
+    if project_name == HOME_SLUG:
         return Path.home() / ".claude" / "settings.local.json"
 
-    if not project_name.startswith(home_slug + "-"):
+    if not project_name.startswith(HOME_SLUG + "-"):
         return None
 
-    project_subdir = project_name[len(home_slug) + 1:]
+    project_subdir = project_name[len(HOME_SLUG) + 1:]
     candidate = Path.home() / project_subdir
     if candidate.is_dir():
         return candidate / ".claude" / "settings.local.json"
@@ -798,6 +793,8 @@ def apply_suggestions(all_records, risk_level="read-only", dry_run=False):
         if risk not in allowed_risks:
             continue
         applicable = suggest_pattern_applicable(cmd)
+        if applicable is None:
+            continue
         by_project[project].append((applicable, count, risk))
 
     if not by_project:
@@ -830,15 +827,7 @@ def apply_suggestions(all_records, risk_level="read-only", dry_run=False):
         if not new_patterns:
             continue
 
-        home_slug = "-" + str(Path.home()).lstrip("/").replace("/", "-")
-        if project == home_slug:
-            proj_short = "(home)"
-        elif project.startswith(home_slug + "-"):
-            proj_short = project[len(home_slug) + 1:]
-        else:
-            proj_short = project
-
-        print(f"\n  {proj_short}: {settings_path}", file=sys.stderr)
+        print(f"\n  {short_project_name(project)}: {settings_path}", file=sys.stderr)
         for pattern, count, risk in new_patterns:
             print(f"    + {pattern}  ({count} approvals, {risk})", file=sys.stderr)
 
@@ -899,8 +888,7 @@ def filter_records(records, since=None, project=None):
         cutoff_str = since.isoformat()
         records = [r for r in records if r["timestamp"] >= cutoff_str]
     if project:
-        home_slug = "-" + str(Path.home()).lstrip("/").replace("/", "-")
-        full_name = home_slug + "-" + project
+        full_name = HOME_SLUG + "-" + project
         records = [r for r in records if r["project"] == full_name]
     return records
 
@@ -920,17 +908,10 @@ def render_json(all_records, out=None):
     risk_counts = Counter(r["risk"] for r in all_records)
     tool_counts = Counter(r["tool_name"] for r in prompted)
 
-    home_slug = "-" + str(Path.home()).lstrip("/").replace("/", "-")
     projects = {}
     for proj in sorted(set(r["project"] for r in all_records)):
         proj_records = [r for r in all_records if r["project"] == proj]
-        if proj == home_slug:
-            proj_short = "(home)"
-        elif proj.startswith(home_slug + "-"):
-            proj_short = proj[len(home_slug) + 1:]
-        else:
-            proj_short = proj
-        projects[proj_short] = {
+        projects[short_project_name(proj)] = {
             "total": len(proj_records),
             "auto_allowed": sum(1 for r in proj_records if r["auto_allowed"]),
             "prompted": sum(1 for r in proj_records if not r["auto_allowed"] and not r["rejected"]),
@@ -1022,7 +1003,6 @@ def render_why(query, all_records):
 
     global_settings = load_global_settings()
     global_allow = global_settings.get("permissions", {}).get("allow", [])
-    home_slug = "-" + str(Path.home()).lstrip("/").replace("/", "-")
 
     projects = sorted(set(r["project"] for r in top_records))
     status_parts = []
@@ -1034,16 +1014,11 @@ def render_why(query, all_records):
             if command_matches_pattern(sample["tool_name"], sample["tool_input"], pat):
                 matching_pattern = pat
                 break
-        if proj == home_slug:
-            proj_short = "(home)"
-        elif proj.startswith(home_slug + "-"):
-            proj_short = proj[len(home_slug) + 1:]
-        else:
-            proj_short = proj
+        pname = short_project_name(proj)
         if matching_pattern:
-            status_parts.append(f"YES in {proj_short} ({matching_pattern})")
+            status_parts.append(f"YES in {pname} ({matching_pattern})")
         else:
-            status_parts.append(f"NO in {proj_short}")
+            status_parts.append(f"NO in {pname}")
     print(f"  Auto-allowed: {', '.join(status_parts)}")
 
     pattern = suggest_pattern(top_display)
@@ -1060,10 +1035,9 @@ def resolve_session(session_arg, project_filter=None):
     if not PROJECTS_DIR.exists():
         return []
 
-    home_slug = "-" + str(Path.home()).lstrip("/").replace("/", "-")
     project_dirs = [d for d in sorted(PROJECTS_DIR.iterdir()) if d.is_dir()]
     if project_filter:
-        full_name = home_slug + "-" + project_filter
+        full_name = HOME_SLUG + "-" + project_filter
         project_dirs = [d for d in project_dirs if d.name == full_name]
 
     all_jsonl = []
