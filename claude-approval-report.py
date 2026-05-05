@@ -54,9 +54,11 @@ MUTATING_COMMANDS = {
     "make", "cmake", "ninja", "gradle", "mvn",
     "crontab", "at",
     "sed", "awk",
-    "gpg", "openssl", "ssh-keygen", "certbot",
+    "gpg", "openssl", "ssh-keygen", "ssh-add", "certbot",
     "modprobe", "insmod", "rmmod", "sysctl",
     "gh", "glab",
+    "eval", "export", "vault",
+    "hermes", "hermes-bin",
     "Write", "Edit", "NotebookEdit", "Agent", "WebFetch", "WebSearch",
 }
 
@@ -80,6 +82,8 @@ READ_ONLY_COMMANDS = {
     "man", "info", "help", "history", "alias",
     "printenv", "env", "true", "false", "test", "time", "sleep",
     "pwd", "dirs", "tty",
+    "pytest", "ruff", "mypy", "semgrep", "sg", "namei", "getent",
+    "journalctl", "ansible-doc", "ssh-keyscan",
     "Read", "Skill", "ToolSearch", "TaskCreate", "TaskUpdate", "TaskList",
     "TaskGet", "TaskOutput", "EnterPlanMode", "ExitPlanMode", "AskUserQuestion",
     "Glob", "Grep",
@@ -106,11 +110,26 @@ def classify_risk(tool_name, tool_input):
         cmd = tool_input.get("command", "").strip()
         cmd = re.sub(r'^cd\s+\S+\s*&&\s*', '', cmd)
         cmd = re.sub(r'^(\w+=\S+\s+)+', '', cmd)
+        # Strip leading shell operators from compound commands
+        cmd = re.sub(r'^[&|;]+\s*', '', cmd)
         parts = cmd.split()
         if not parts or parts[0].startswith("#"):
             return "read-only"
 
         base = os.path.basename(parts[0])
+        # Strip trailing punctuation from parsing artifacts
+        base = base.rstrip('"\')}')
+
+        # Detect secret/key material exposure (not in grep/search contexts)
+        if base not in ("grep", "egrep", "fgrep", "rg", "ag", "ack", "find"):
+            for token in parts[1:]:
+                clean = token.strip("\"'")
+                # Standalone base64 blobs that look like keys (no path separators)
+                if len(clean) >= 40 and "/" not in clean and re.match(r'^[A-Za-z0-9+/=]+$', clean):
+                    return "destructive"
+                # Inline secret assignments: VAR=<value> where VAR names a secret
+                if re.match(r'^([\w]*)(API_KEY|SECRET|TOKEN|PASSWORD|PRIVATE_KEY|CREDENTIAL)([\w]*)=.+', clean, re.IGNORECASE):
+                    return "destructive"
 
         # Git subcommand-aware classification
         if base == "git" and len(parts) > 1:
@@ -161,6 +180,24 @@ def classify_risk(tool_name, tool_input):
             return "read-only"
         if base in MUTATING_COMMANDS:
             return "mutating"
+        # Shell builtins/syntax that aren't real commands
+        if base in ("for", "while", "if", "else", "then", "do", "done",
+                    "fi", "case", "esac", "{", "}", "[[", "(("):
+            return "read-only"
+        # Flags, IP addresses, user@host, and other parsing artifacts
+        if base.startswith("-") or re.match(r'^\d+\.\d+\.\d+\.\d+', base):
+            return "read-only"
+        if re.match(r'^[\w]+@[\d.]+$', base):
+            return "mutating"
+        # Shell scripts (.sh) are mutating by default
+        if base.endswith(".sh"):
+            return "mutating"
+        # Bare key material / secret references parsed as "commands"
+        clean_base = base.strip("\"'^)")
+        if len(clean_base) >= 40 and re.match(r'^[A-Za-z0-9+/=]+$', clean_base):
+            return "destructive"
+        if re.search(r'(API_KEY|SECRET|TOKEN|PASSWORD|PRIVATE_KEY|CREDENTIAL)', clean_base.upper()):
+            return "destructive"
         return "unknown"
 
     # Non-Bash tools
@@ -474,6 +511,22 @@ def process_session(jsonl_path, allow_patterns, project_name):
 
 # --- Report rendering ---
 
+NOISE_SUFFIXES = {
+    "(comment/shebang)", "(empty)",
+    "&&", "for", "if", "while", "else", "then", "do", "done", "fi", "{", "}",
+}
+
+
+def _is_noise_command(display):
+    """Check if a display string is a noise entry (not a real command)."""
+    suffix = display.split(": ", 1)[1] if ": " in display else display
+    if suffix in NOISE_SUFFIXES:
+        return True
+    if suffix.startswith("-") or re.match(r'^\d+\.\d+\.\d+\.\d+', suffix):
+        return True
+    return False
+
+
 def render_report(all_records, out=None):
     """Render the analysis report. Writes to out (file object) or stdout."""
     if out is None:
@@ -502,8 +555,14 @@ def render_report(all_records, out=None):
     prompt_counts = Counter(r["display"] for r in prompted)
     _print(f"  {'Rank':<6} {'Count':<8} {'Command'}")
     _print(f"  {'----':<6} {'-----':<8} {'-------'}")
-    for i, (cmd, count) in enumerate(prompt_counts.most_common(25), 1):
-        _print(f"  {i:<6} {count:<8} {cmd}")
+    shown = 0
+    for cmd, count in prompt_counts.most_common():
+        if _is_noise_command(cmd):
+            continue
+        shown += 1
+        _print(f"  {shown:<6} {count:<8} {cmd}")
+        if shown >= 25:
+            break
     _print()
 
     # --- Most rejected ---
@@ -896,6 +955,135 @@ def render_json(all_records, out=None):
     out.write("\n")
 
 
+def render_summary(all_records, out=None):
+    """Render a compact dashboard summary."""
+    if out is None:
+        out = sys.stdout
+    _print = lambda *a, **kw: print(*a, file=out, **kw)
+
+    total = len(all_records)
+    auto = sum(1 for r in all_records if r["auto_allowed"])
+    prompted = [r for r in all_records if not r["auto_allowed"] and not r["rejected"]]
+    rejected = sum(1 for r in all_records if r["rejected"])
+    risk_counts = Counter(r["risk"] for r in all_records)
+
+    _print("CLAUDE CODE APPROVAL SUMMARY")
+    _print(f"  Calls: {total:,} total | {auto:,} auto | {len(prompted):,} prompted | {rejected:,} rejected")
+    _print(f"  Risk:  {risk_counts.get('destructive',0)} destructive | {risk_counts.get('mutating',0):,} mutating | {risk_counts.get('read-only',0):,} read-only | {risk_counts.get('unknown',0)} unknown")
+
+    secret_count = sum(1 for r in all_records
+                       if r["risk"] == "destructive" and not r["rejected"]
+                       and re.search(r'(API_KEY|SECRET|TOKEN|PASSWORD|PRIVATE_KEY|CREDENTIAL)',
+                                     r.get("full_command", ""), re.IGNORECASE))
+    if secret_count:
+        _print(f"  Secrets: {secret_count} secret-exposure commands approved")
+
+    prompt_counts = Counter(r["display"] for r in prompted)
+    _print("\n  Top prompted:")
+    shown = 0
+    for cmd, count in prompt_counts.most_common():
+        if _is_noise_command(cmd):
+            continue
+        shown += 1
+        _print(f"    {shown}. {cmd:<40} ({count}x)")
+        if shown >= 5:
+            break
+
+    suggestions = build_suggestions(all_records)
+    if suggestions:
+        _print("\n  Top suggestions:")
+        for i, (count, project, cmd, pattern, risk) in enumerate(suggestions[:3], 1):
+            _print(f"    {i}. {pattern:<40} ({count} approvals, {risk})")
+
+
+def render_why(query, all_records):
+    """Look up why a specific command gets prompted and how to fix it."""
+    q = query.lower()
+    matched = [r for r in all_records if q in r["display"].lower()]
+    if not matched:
+        matched = [r for r in all_records if q in r.get("full_command", "").lower()]
+
+    if not matched:
+        print(f"No records found matching '{query}'.", file=sys.stderr)
+        return
+
+    displays = Counter(r["display"] for r in matched)
+    top_display = displays.most_common(1)[0][0]
+    top_records = [r for r in matched if r["display"] == top_display]
+    sample = top_records[0]
+
+    auto_count = sum(1 for r in top_records if r["auto_allowed"])
+    prompted_count = sum(1 for r in top_records if not r["auto_allowed"] and not r["rejected"])
+    rejected_count = sum(1 for r in top_records if r["rejected"])
+
+    print(f"WHY: {top_display}")
+    print(f"  Risk:         {sample['risk']}")
+    print(f"  Prompted:     {prompted_count}x  |  Auto-allowed: {auto_count}x  |  Rejected: {rejected_count}x")
+
+    global_settings = load_global_settings()
+    global_allow = global_settings.get("permissions", {}).get("allow", [])
+    home_slug = "-" + str(Path.home()).lstrip("/").replace("/", "-")
+
+    projects = sorted(set(r["project"] for r in top_records))
+    status_parts = []
+    for proj in projects:
+        proj_allow = load_project_settings(proj)
+        combined = global_allow + proj_allow
+        matching_pattern = None
+        for pat in combined:
+            if command_matches_pattern(sample["tool_name"], sample["tool_input"], pat):
+                matching_pattern = pat
+                break
+        if proj == home_slug:
+            proj_short = "(home)"
+        elif proj.startswith(home_slug + "-"):
+            proj_short = proj[len(home_slug) + 1:]
+        else:
+            proj_short = proj
+        if matching_pattern:
+            status_parts.append(f"YES in {proj_short} ({matching_pattern})")
+        else:
+            status_parts.append(f"NO in {proj_short}")
+    print(f"  Auto-allowed: {', '.join(status_parts)}")
+
+    pattern = suggest_pattern(top_display)
+    print(f"  To auto-allow: {pattern}")
+
+    if len(displays) > 1:
+        print(f"\n  Also matched:")
+        for cmd, count in displays.most_common()[1:5]:
+            print(f"    {cmd} ({count}x)")
+
+
+def resolve_session(session_arg, project_filter=None):
+    """Resolve --session argument to JSONL file paths."""
+    if not PROJECTS_DIR.exists():
+        return []
+
+    home_slug = "-" + str(Path.home()).lstrip("/").replace("/", "-")
+    project_dirs = [d for d in sorted(PROJECTS_DIR.iterdir()) if d.is_dir()]
+    if project_filter:
+        full_name = home_slug + "-" + project_filter
+        project_dirs = [d for d in project_dirs if d.name == full_name]
+
+    all_jsonl = []
+    for d in project_dirs:
+        all_jsonl.extend(d.glob("*.jsonl"))
+
+    if not all_jsonl:
+        return []
+
+    if session_arg == "current":
+        return [max(all_jsonl, key=lambda p: p.stat().st_mtime)]
+
+    target = session_arg if session_arg.endswith(".jsonl") else session_arg + ".jsonl"
+    matches = [p for p in all_jsonl if p.name == target]
+    if matches:
+        return matches
+
+    return [p for p in all_jsonl if session_arg in p.name]
+
+
 def main():
     parser = argparse.ArgumentParser(description="Analyze Claude Code approval data")
     parser.add_argument(
@@ -938,6 +1126,24 @@ def main():
         default=False,
         help="With --apply, show what would be added without writing.",
     )
+    parser.add_argument(
+        "--summary", "--brief",
+        action="store_true",
+        default=False,
+        help="Compact dashboard instead of full report.",
+    )
+    parser.add_argument(
+        "--why",
+        default=None,
+        metavar="COMMAND",
+        help="Look up why a command is prompted and how to auto-allow it.",
+    )
+    parser.add_argument(
+        "--session",
+        default=None,
+        metavar="ID",
+        help="Analyze a specific session. 'current' for most recent, or a session UUID.",
+    )
     args = parser.parse_args()
 
     since = parse_time_filter(args.since) if args.since else None
@@ -948,21 +1154,34 @@ def main():
     global_allow = global_settings.get("permissions", {}).get("allow", [])
 
     all_records = []
-    project_dirs = sorted(PROJECTS_DIR.iterdir()) if PROJECTS_DIR.exists() else []
 
-    for project_dir in project_dirs:
-        if not project_dir.is_dir():
-            continue
+    session_files = None
+    if args.session:
+        session_files = resolve_session(args.session, project_filter=args.project)
+        if not session_files:
+            print(f"No session found matching '{args.session}'.", file=sys.stderr)
+            sys.exit(1)
+        for sf in session_files:
+            print(f"Session: {sf.name}", file=sys.stderr)
 
-        project_name = project_dir.name
-
-        project_allow = load_project_settings(project_name)
-        combined_allow = global_allow + project_allow
-
-        jsonl_files = sorted(project_dir.glob("*.jsonl"))
-        for jsonl_file in jsonl_files:
-            records = process_session(str(jsonl_file), combined_allow, project_name)
+    if session_files:
+        for sf in session_files:
+            project_name = sf.parent.name
+            project_allow = load_project_settings(project_name)
+            records = process_session(str(sf), global_allow + project_allow, project_name)
             all_records.extend(records)
+    else:
+        project_dirs = sorted(PROJECTS_DIR.iterdir()) if PROJECTS_DIR.exists() else []
+        for project_dir in project_dirs:
+            if not project_dir.is_dir():
+                continue
+            project_name = project_dir.name
+            project_allow = load_project_settings(project_name)
+            combined_allow = global_allow + project_allow
+            jsonl_files = sorted(project_dir.glob("*.jsonl"))
+            for jsonl_file in jsonl_files:
+                records = process_session(str(jsonl_file), combined_allow, project_name)
+                all_records.extend(records)
 
     all_records = filter_records(all_records, since=since, project=args.project)
 
@@ -970,18 +1189,29 @@ def main():
         print("No tool call data found.", file=sys.stderr)
         sys.exit(1)
 
-    if args.since or args.project:
-        filters = []
-        if args.since:
-            filters.append(f"since {args.since}")
-        if args.project:
-            filters.append(f"project={args.project}")
-        print(f"Filters: {', '.join(filters)}", file=sys.stderr)
+    active_filters = []
+    if args.since:
+        active_filters.append(f"since {args.since}")
+    if args.project:
+        active_filters.append(f"project={args.project}")
+    if args.session:
+        active_filters.append(f"session={args.session}")
+    if active_filters:
+        print(f"Filters: {', '.join(active_filters)}", file=sys.stderr)
+
+    if args.why:
+        render_why(args.why, all_records)
+        return
 
     if args.apply is not None:
         apply_suggestions(all_records, risk_level=args.apply, dry_run=args.dry_run)
     else:
-        renderer = render_json if args.json else render_report
+        if args.summary:
+            renderer = render_summary
+        elif args.json:
+            renderer = render_json
+        else:
+            renderer = render_report
 
         if args.output is None:
             renderer(all_records)

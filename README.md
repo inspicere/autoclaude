@@ -17,9 +17,10 @@ Claude Code stores session transcripts as JSONL files under `~/.claude/projects/
 1. Loads permission allowlists from global and per-project settings
 2. Parses every session JSONL file across all projects in `~/.claude/projects/`
 3. Classifies each tool call as **auto-allowed** (matched an allowlist pattern), **prompted & approved**, or **rejected**
-4. Classifies each tool call by **risk level** — destructive, mutating, or read-only — using curated command lists with flag-aware logic for git, curl, find, sed, and ansible-playbook
+4. Classifies each tool call by **risk level** — destructive, mutating, or read-only — using curated command lists with flag-aware logic for git, curl, find, sed, and ansible-playbook; detects secret/key material exposure in command arguments
 5. Groups commands by normalized prefix (e.g. all `git add` variants together, all `ssh` to the same host together)
-6. Renders ranked tables: most prompted, most rejected, risk breakdown, destructive approvals, auto-allowed risky commands, suggested allowlist additions, per-project summary, and tool type breakdown
+6. Filters noise entries (shell syntax fragments, comment/shebang lines, IP addresses, flags) from prompted commands report
+7. Renders ranked tables: most prompted, most rejected, risk breakdown, destructive approvals, auto-allowed risky commands, suggested allowlist additions, per-project summary, and tool type breakdown
 
 ## Requirements
 
@@ -111,29 +112,29 @@ Report from a homelab infrastructure project (~12.6k tool calls across 10 projec
   ----   -----    -------
   1      378      Bash: tail
   2      349      Bash: ssh 192.168.86.122
-  3      268      Bash: (comment/shebang)
-  4      260      Bash: ls
-  5      250      Bash: grep
-  6      217      TaskUpdate
-  7      211      Agent
-  8      171      Bash: cat
-  9      161      Bash: find
-  10     146      ToolSearch
-  11     137      Bash: sleep
-  12     131      Bash: git diff
-  13     127      Bash: ssh
-  14     108      TaskCreate
-  15     107      Bash: git
-  16     100      Bash: git status
-  17     94       Bash: git add
-  18     91       Bash: sudo
-  19     87       Bash: wc
-  20     86       Bash: python3
-  21     86       Edit: ~/laima/docs/laima-project-tracker.md
-  22     82       Bash: git log
-  23     81       Bash: ssh 192.168.86.125
-  24     70       Bash: mkdir
-  25     62       Edit: ~/laima-titan/.titan/STATE.md
+  3      260      Bash: ls
+  4      250      Bash: grep
+  5      217      TaskUpdate
+  6      211      Agent
+  7      171      Bash: cat
+  8      161      Bash: find
+  9      146      ToolSearch
+  10     137      Bash: sleep
+  11     131      Bash: git diff
+  12     127      Bash: ssh
+  13     108      TaskCreate
+  14     107      Bash: git
+  15     100      Bash: git status
+  16     94       Bash: git add
+  17     91       Bash: sudo
+  18     87       Bash: wc
+  19     86       Bash: python3
+  20     86       Edit: ~/laima/docs/laima-project-tracker.md
+  21     82       Bash: git log
+  22     81       Bash: ssh 192.168.86.125
+  23     70       Bash: mkdir
+  24     62       Edit: ~/laima-titan/.titan/STATE.md
+  25     62       Bash: head
 
 ======================================================================
   MOST REJECTED COMMANDS (top 15)
@@ -171,10 +172,10 @@ Report from a homelab infrastructure project (~12.6k tool calls across 10 projec
 ======================================================================
   RISK BREAKDOWN
 ======================================================================
-  destructive           34  (  0.3%)
+  destructive          301  (  2.4%)
   mutating           6,977  ( 55.3%)
-  read-only          5,307  ( 42.0%)
-  unknown              310  (  2.5%)
+  read-only          5,343  ( 42.3%)
+  unknown                7  (  0.1%)
 
 ======================================================================
   DESTRUCTIVE COMMANDS APPROVED (all)
