@@ -15,6 +15,166 @@ from fnmatch import fnmatch
 CLAUDE_DIR = Path.home() / ".claude"
 PROJECTS_DIR = CLAUDE_DIR / "projects"
 
+# --- Risk classification ---
+
+DESTRUCTIVE_COMMANDS = {
+    "rm", "rmdir", "shred", "srm", "wipe", "unlink",
+    "mkfs", "mkfs.ext4", "mkfs.xfs", "mkfs.btrfs", "mkfs.vfat", "mkfs.ntfs",
+    "mkswap", "dd", "wipefs", "blkdiscard", "sgdisk", "sfdisk", "cfdisk", "parted",
+    "dropdb", "dropuser", "mysqladmin",
+    "reboot", "shutdown", "halt", "poweroff", "init", "telinit",
+    "userdel", "groupdel", "deluser", "delgroup",
+    "iptables-restore", "cryptsetup",
+}
+
+MUTATING_COMMANDS = {
+    "mv", "cp", "install", "touch", "mkdir", "mktemp", "tee", "truncate",
+    "ln", "patch", "perl", "python", "python3", "ruby", "node",
+    "bash", "sh", "zsh", "sudo", "su", "doas",
+    "xargs", "nohup", "chroot",
+    "chmod", "chown", "chgrp", "chattr", "setfacl",
+    "tar", "zip", "unzip", "gzip", "gunzip", "bzip2", "xz", "7z",
+    "apt", "apt-get", "dpkg", "yum", "dnf", "rpm", "pacman", "apk",
+    "snap", "flatpak", "brew", "port", "nix",
+    "pip", "pip3", "pipx", "conda", "uv", "poetry",
+    "npm", "npx", "yarn", "pnpm", "bun", "deno",
+    "cargo", "rustup", "go", "gem", "bundle", "composer",
+    "systemctl", "service", "mount", "umount",
+    "fdisk", "gdisk", "lvm", "mdadm", "zpool", "zfs", "btrfs",
+    "kill", "killall", "pkill",
+    "useradd", "usermod", "adduser", "groupadd", "passwd",
+    "iptables", "ip6tables", "nft", "firewall-cmd", "ufw",
+    "ip", "ifconfig", "nmcli", "ethtool",
+    "docker", "podman", "kubectl", "helm", "terraform", "tofu", "pulumi",
+    "vagrant", "packer",
+    "ansible", "ansible-playbook", "ansible-vault", "ansible-galaxy",
+    "aws", "gcloud", "az", "doctl", "heroku", "vercel", "flyctl", "wrangler",
+    "psql", "mysql", "mongosh", "redis-cli", "sqlite3",
+    "curl", "wget", "scp", "rsync", "ssh", "sftp",
+    "make", "cmake", "ninja", "gradle", "mvn",
+    "crontab", "at",
+    "sed", "awk",
+    "gpg", "openssl", "ssh-keygen", "certbot",
+    "modprobe", "insmod", "rmmod", "sysctl",
+    "gh", "glab",
+    "Write", "Edit", "NotebookEdit", "Agent", "WebFetch", "WebSearch",
+}
+
+READ_ONLY_COMMANDS = {
+    "ls", "dir", "tree", "cat", "head", "tail", "less", "more", "bat",
+    "nl", "tac", "rev", "od", "xxd", "hexdump", "strings",
+    "file", "stat", "readlink", "realpath", "basename", "dirname",
+    "grep", "egrep", "fgrep", "rg", "ag", "ack",
+    "find", "fd", "locate", "which", "whereis", "whatis", "type",
+    "wc", "sort", "uniq", "cut", "paste", "tr", "fold", "fmt", "column",
+    "comm", "diff", "cmp", "md5sum", "sha256sum", "shasum",
+    "base64", "jq", "yq",
+    "printf", "echo", "expr", "bc", "seq",
+    "du", "df", "lsblk", "blkid", "findmnt", "lsof",
+    "uname", "hostname", "arch", "nproc", "lscpu", "lsmem", "lspci", "lsusb",
+    "uptime", "date", "cal",
+    "ps", "top", "htop", "vmstat", "iostat", "free", "pmap", "pstree",
+    "w", "who", "whoami", "id", "groups", "last", "users",
+    "ss", "netstat", "ping", "traceroute", "tracepath", "mtr",
+    "dig", "nslookup", "host", "whois", "nmap",
+    "man", "info", "help", "history", "alias",
+    "printenv", "env", "true", "false", "test", "time", "sleep",
+    "pwd", "dirs", "tty",
+    "Read", "Skill", "ToolSearch", "TaskCreate", "TaskUpdate", "TaskList",
+    "TaskGet", "TaskOutput", "EnterPlanMode", "ExitPlanMode", "AskUserQuestion",
+    "Glob", "Grep",
+}
+
+# Git subcommands that override the base "mutating" classification
+GIT_DESTRUCTIVE_SUBCMDS = {
+    "push --force", "push -f", "push --force-with-lease",
+    "reset --hard", "clean -f", "clean -fd", "clean -fx",
+    "branch -D",
+}
+GIT_READ_ONLY_SUBCMDS = {
+    "status", "log", "diff", "show", "branch", "tag", "remote",
+    "blame", "shortlog", "describe", "rev-parse", "rev-list",
+    "ls-files", "ls-tree", "ls-remote", "cat-file", "reflog",
+    "for-each-ref", "count-objects", "fsck", "whatchanged",
+    "check-ignore", "help", "version",
+}
+
+
+def classify_risk(tool_name, tool_input):
+    """Classify a tool call as destructive/mutating/read-only."""
+    if tool_name == "Bash":
+        cmd = tool_input.get("command", "").strip()
+        cmd = re.sub(r'^cd\s+\S+\s*&&\s*', '', cmd)
+        cmd = re.sub(r'^(\w+=\S+\s+)+', '', cmd)
+        parts = cmd.split()
+        if not parts or parts[0].startswith("#"):
+            return "read-only"
+
+        base = os.path.basename(parts[0])
+
+        # Git subcommand-aware classification
+        if base == "git" and len(parts) > 1:
+            subcmd = parts[1]
+            # Check for destructive flag combos
+            rest = " ".join(parts[1:])
+            for pattern in GIT_DESTRUCTIVE_SUBCMDS:
+                if rest.startswith(pattern):
+                    return "destructive"
+            if subcmd in GIT_READ_ONLY_SUBCMDS:
+                return "read-only"
+            return "mutating"
+
+        # find with -delete or -exec
+        if base == "find":
+            rest = " ".join(parts[1:])
+            if "-delete" in rest:
+                return "destructive"
+            if "-exec" in rest or "-execdir" in rest:
+                return "mutating"
+            return "read-only"
+
+        # sed with -i is mutating, otherwise read-only
+        if base == "sed":
+            if "-i" in parts:
+                return "mutating"
+            return "read-only"
+
+        # ansible-playbook with --check/--syntax-check is read-only
+        if base == "ansible-playbook":
+            rest = " ".join(parts[1:])
+            if "--check" in rest or "--syntax-check" in rest or "--list-tasks" in rest or "--list-hosts" in rest:
+                return "read-only"
+            return "mutating"
+
+        # curl: check method
+        if base == "curl":
+            rest = " ".join(parts[1:])
+            if "-X DELETE" in rest or "--request DELETE" in rest:
+                return "destructive"
+            if any(f in rest for f in ["-X POST", "-X PUT", "-X PATCH", "--data", "-d ", "-F "]):
+                return "mutating"
+            return "read-only"
+
+        if base in DESTRUCTIVE_COMMANDS:
+            return "destructive"
+        if base in READ_ONLY_COMMANDS:
+            return "read-only"
+        if base in MUTATING_COMMANDS:
+            return "mutating"
+        return "unknown"
+
+    # Non-Bash tools
+    if tool_name in DESTRUCTIVE_COMMANDS:
+        return "destructive"
+    if tool_name in READ_ONLY_COMMANDS:
+        return "read-only"
+    if tool_name in MUTATING_COMMANDS:
+        return "mutating"
+    if tool_name.startswith("mcp__"):
+        return "mutating"
+    return "unknown"
+
+
 # --- Allowlist pattern matching ---
 
 def load_global_settings():
@@ -306,6 +466,7 @@ def process_session(jsonl_path, allow_patterns, project_name):
             tool_input = tool.get("input", {})
 
             auto = is_auto_allowed(tool_name, tool_input, allow_patterns)
+            risk = classify_risk(tool_name, tool_input)
 
             records.append({
                 "project": project_name,
@@ -316,6 +477,7 @@ def process_session(jsonl_path, allow_patterns, project_name):
                 "full_command": get_tool_full_command(tool_name, tool_input),
                 "rejected": is_rejected,
                 "auto_allowed": auto,
+                "risk": risk,
                 "timestamp": obj.get("timestamp", ""),
             })
 
@@ -413,6 +575,48 @@ def render_report(all_records, out=None):
         proj_short = project.split("-")[-1] if "-" in project else project
         _print(f"  {count:<8} {proj_short:<30} {pattern}")
     _print()
+
+    # --- Risk breakdown ---
+    _print("=" * 70)
+    _print("  RISK BREAKDOWN")
+    _print("=" * 70)
+
+    risk_counts = Counter(r["risk"] for r in all_records)
+    for level in ["destructive", "mutating", "read-only", "unknown"]:
+        count = risk_counts.get(level, 0)
+        pct = (count / total * 100) if total else 0
+        _print(f"  {level:<15} {count:>8,}  ({pct:>5.1f}%)")
+    _print()
+
+    # --- High-risk approvals ---
+    destructive_approved = [r for r in all_records if r["risk"] == "destructive" and not r["rejected"]]
+    if destructive_approved:
+        _print("=" * 70)
+        _print("  DESTRUCTIVE COMMANDS APPROVED (all)")
+        _print("  Commands classified as destructive that were approved")
+        _print("=" * 70)
+        destr_counts = Counter(r["display"] for r in destructive_approved)
+        _print(f"  {'Rank':<6} {'Count':<8} {'Command'}")
+        _print(f"  {'----':<6} {'-----':<8} {'-------'}")
+        for i, (cmd, count) in enumerate(destr_counts.most_common(20), 1):
+            _print(f"  {i:<6} {count:<8} {cmd}")
+        _print()
+
+    # --- Auto-allowed mutating/destructive ---
+    risky_auto = [r for r in all_records if r["auto_allowed"] and r["risk"] in ("destructive", "mutating")]
+    if risky_auto:
+        _print("=" * 70)
+        _print("  AUTO-ALLOWED RISKY COMMANDS")
+        _print("  Mutating/destructive commands that bypassed approval prompts")
+        _print("=" * 70)
+        risky_auto_counts = Counter(
+            (r["display"], r["risk"]) for r in risky_auto
+        )
+        _print(f"  {'Count':<8} {'Risk':<14} {'Command'}")
+        _print(f"  {'-----':<8} {'----':<14} {'-------'}")
+        for (cmd, risk), count in risky_auto_counts.most_common(20):
+            _print(f"  {count:<8} {risk:<14} {cmd}")
+        _print()
 
     # --- Per-project summary ---
     _print("=" * 70)
