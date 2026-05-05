@@ -75,6 +75,43 @@ python3 claude-approval-report.py --apply --since 7d --project laima --dry-run
 
 The `--apply` flag writes frequently-approved patterns directly to each project's `.claude/settings.local.json`. By default only read-only commands are applied. Destructive patterns are never auto-applied.
 
+### Summary mode
+
+```
+# Compact ~12 line dashboard (useful as Claude Code skill output)
+python3 claude-approval-report.py --summary
+
+# Also available as --brief
+python3 claude-approval-report.py --brief
+```
+
+Shows call counts, risk breakdown, secret exposure count, top 5 prompted commands, and top 3 suggestions. Composes with `--since`, `--project`, and `--session`.
+
+### Command lookup
+
+```
+# Diagnose why a specific command gets prompted
+python3 claude-approval-report.py --why "git push"
+
+# Shows risk level, prompt/auto/reject counts, allowlist status per project,
+# and the exact pattern to add
+python3 claude-approval-report.py --why ssh
+```
+
+Substring match on display name, falls back to full command text.
+
+### Session filtering
+
+```
+# Analyze only the most recently modified session
+python3 claude-approval-report.py --session current
+
+# Analyze a specific session by UUID or partial filename
+python3 claude-approval-report.py --session 3a7b9c
+```
+
+Composes with `--since`, `--project`, `--summary`, and `--why`.
+
 ### JSON output
 
 ```
