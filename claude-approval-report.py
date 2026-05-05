@@ -551,10 +551,13 @@ def render_report(all_records, out=None):
     _print("  Frequently approved commands that could be auto-allowed")
     _print("=" * 70)
 
-    # Group by project and command pattern
+    # Group by project and command pattern, tracking risk
     by_project = defaultdict(lambda: Counter())
+    risk_by_key = defaultdict(lambda: Counter())
     for r in prompted:
+        key = (r["project"], r["display"])
         by_project[r["project"]][r["display"]] += 1
+        risk_by_key[key][r["risk"]] += 1
 
     suggestions = []
     skip_patterns = {"(comment/shebang)", "(empty)"}
@@ -565,15 +568,16 @@ def render_report(all_records, out=None):
                 if cmd_suffix in skip_patterns:
                     continue
                 pattern = suggest_pattern(cmd)
-                suggestions.append((count, project, cmd, pattern))
+                risk = risk_by_key[(project, cmd)].most_common(1)[0][0]
+                suggestions.append((count, project, cmd, pattern, risk))
 
     suggestions.sort(key=lambda x: -x[0])
 
-    _print(f"  {'Count':<8} {'Project':<30} {'Suggested Pattern'}")
-    _print(f"  {'-----':<8} {'-------':<30} {'-----------------'}")
-    for count, project, cmd, pattern in suggestions[:20]:
+    _print(f"  {'Count':<8} {'Risk':<14} {'Project':<18} {'Suggested Pattern'}")
+    _print(f"  {'-----':<8} {'----':<14} {'-------':<18} {'-----------------'}")
+    for count, project, cmd, pattern, risk in suggestions[:20]:
         proj_short = project.split("-")[-1] if "-" in project else project
-        _print(f"  {count:<8} {proj_short:<30} {pattern}")
+        _print(f"  {count:<8} {risk:<14} {proj_short:<18} {pattern}")
     _print()
 
     # --- Risk breakdown ---
