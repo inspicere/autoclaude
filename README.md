@@ -6,10 +6,16 @@ Analyzes Claude Code session data to show which tool calls required the most use
 
 Claude Code stores session transcripts as JSONL files under `~/.claude/projects/`. Each file contains interleaved assistant and user records — when the assistant makes a tool call (`Bash`, `Edit`, `Write`, etc.), the user record that follows contains the result and whether the call was approved or rejected.
 
-The script:
+### Data sources
 
-1. Loads permission allowlists from `~/.claude/settings.json` (global) and each project's `.claude/settings.local.json`
-2. Parses every session JSONL file across all projects
+- **Session data**: `~/.claude/projects/<project>/*.jsonl` — one JSONL file per conversation session, containing all tool calls and results
+- **Global allowlist**: `~/.claude/settings.json` — permissions that apply to all projects
+- **Per-project allowlists**: derived from the project directory name (e.g. `-home-terrabot-laima` maps to `/home/terrabot/laima/.claude/settings.local.json`) and from `~/.claude/projects/<project>/settings.json`
+
+### What the script does
+
+1. Loads permission allowlists from global and per-project settings
+2. Parses every session JSONL file across all projects in `~/.claude/projects/`
 3. Classifies each tool call as **auto-allowed** (matched an allowlist pattern), **prompted & approved**, or **rejected**
 4. Groups commands by normalized prefix (e.g. all `git add` variants together, all `ssh` to the same host together)
 5. Renders ranked tables: most prompted, most rejected, suggested allowlist additions, per-project breakdown, and tool type breakdown
