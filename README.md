@@ -63,8 +63,14 @@ The `--since` flag accepts relative times (`7d`, `2w`, `1m`) or ISO dates (`2026
 # Preview what would be added (dry run)
 python3 claude-approval-report.py --apply --dry-run
 
-# Apply read-only suggestions to settings.local.json files
+# Apply read-only suggestions to per-project settings.local.json files
 python3 claude-approval-report.py --apply
+
+# Consolidate common patterns (3+ projects) into global ~/.claude/settings.json
+python3 claude-approval-report.py --apply --scope global
+
+# Global + project-specific remainder (recommended for initial setup)
+python3 claude-approval-report.py --apply --scope both --dry-run
 
 # Also apply mutating suggestions (never applies destructive)
 python3 claude-approval-report.py --apply mutating
@@ -73,7 +79,15 @@ python3 claude-approval-report.py --apply mutating
 python3 claude-approval-report.py --apply --since 7d --project laima --dry-run
 ```
 
-The `--apply` flag writes frequently-approved patterns directly to each project's `.claude/settings.local.json`. By default only read-only commands are applied. Destructive patterns are never auto-applied. Without `--dry-run`, a confirmation prompt is shown before changes are written.
+The `--apply` flag writes frequently-approved patterns to settings files. The `--scope` flag controls where:
+
+| Scope | Writes to | Use case |
+|-------|-----------|----------|
+| `project` (default) | Each project's `.claude/settings.local.json` | Per-project customization |
+| `global` | `~/.claude/settings.json` | Patterns appearing in 3+ projects |
+| `both` | Global + per-project remainder | Initial setup — consolidates common patterns globally, keeps project-specific ones local |
+
+By default only read-only commands are applied. Destructive patterns are never auto-applied. Without `--dry-run`, a confirmation prompt is shown before changes are written.
 
 ### Summary mode
 

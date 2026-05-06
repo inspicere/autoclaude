@@ -42,9 +42,10 @@ Key design choices:
 
 A self-contained Python hook (no imports from the main script) that blocks tool calls containing secrets before execution. Uses the same 22 token regex patterns as the report script, duplicated intentionally so the hook works standalone when installed at `~/.claude/hooks/`. Blocks via exit code 2 (stderr shown to user). The `_GREP_FAMILY` exclusion set mirrors the main script's approach — search commands are exempt from secret scanning.
 
-The hook covers two gaps that deny rules cannot:
+The hook covers gaps that deny rules cannot:
 1. Secrets embedded in Bash commands (`VAULT_TOKEN=hvs.xxx vault kv get`)
 2. Sensitive file reads via Bash (`cat .env`) that bypass Read tool deny rules
+3. Bypass vectors: subshell wrapping (`bash -c`), `eval`, interpreter file I/O (`python3 -c "open('.env')"`), file copy/move/link (`cp .env /tmp/x`), `dd if=`, stdin redirection (`< .env`)
 
 ## Reference settings (`settings/recommended-deny.json`)
 

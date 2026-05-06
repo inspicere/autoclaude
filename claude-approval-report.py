@@ -955,16 +955,23 @@ def project_settings_path(project_name):
     return None
 
 
-def apply_suggestions(all_records, risk_level="read-only", dry_run=False):
-    """Apply suggested allowlist patterns to project settings.local.json files."""
+MIN_PROJECTS_FOR_GLOBAL = 3
+
+
+def _collect_applicable(all_records, risk_level="read-only"):
+    """Collect applicable suggestions grouped by project. Returns (by_project, pattern_projects).
+
+    by_project: {project: [(pattern, count, risk), ...]}
+    pattern_projects: {pattern: set of projects} — how many projects use each pattern
+    """
     suggestions = build_suggestions(all_records)
 
     allowed_risks = {"read-only"}
     if risk_level == "mutating":
         allowed_risks.add("mutating")
 
-    # Group applicable suggestions by project
     by_project = defaultdict(list)
+    pattern_projects = defaultdict(set)
     for count, project, cmd, pattern, risk in suggestions:
         if risk not in allowed_risks:
             continue
@@ -972,61 +979,120 @@ def apply_suggestions(all_records, risk_level="read-only", dry_run=False):
         if applicable is None:
             continue
         by_project[project].append((applicable, count, risk))
+        pattern_projects[applicable].add(project)
+
+    return by_project, pattern_projects
+
+
+def _write_settings(path, settings, dry_run):
+    """Write settings JSON to path unless dry_run."""
+    if dry_run:
+        return
+    if not path.parent.exists():
+        print(f"    Skipping: {path.parent} does not exist", file=sys.stderr)
+        return
+    with open(path, "w") as f:
+        json.dump(settings, f, indent=2)
+        f.write("\n")
+
+
+def _load_settings(path):
+    """Load JSON settings from path, returning empty dict on missing/invalid."""
+    if path.exists():
+        try:
+            with open(path) as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {}
+
+
+def apply_suggestions(all_records, risk_level="read-only", dry_run=False, scope="project"):
+    """Apply suggested allowlist patterns to settings files.
+
+    scope: 'project' — per-project settings.local.json only (default)
+           'global'  — patterns in 3+ projects go to ~/.claude/settings.json
+           'both'    — global patterns to settings.json, remainder to settings.local.json
+    """
+    by_project, pattern_projects = _collect_applicable(all_records, risk_level)
 
     if not by_project:
         print("No applicable suggestions found.", file=sys.stderr)
         return
 
+    global_patterns = set()
+    if scope in ("global", "both"):
+        global_patterns = {p for p, projs in pattern_projects.items()
+                          if len(projs) >= MIN_PROJECTS_FOR_GLOBAL}
+
     total_added = 0
-    for project, patterns in sorted(by_project.items()):
-        settings_path = project_settings_path(project)
-        if settings_path is None:
-            continue
 
-        # Load existing settings
-        if settings_path.exists():
-            try:
-                with open(settings_path) as f:
-                    settings = json.load(f)
-            except (json.JSONDecodeError, OSError):
-                settings = {}
-        else:
-            settings = {}
+    # --- Global settings ---
+    if global_patterns:
+        global_path = CLAUDE_DIR / "settings.json"
+        global_settings = _load_settings(global_path)
+        existing_global = set(global_settings.get("permissions", {}).get("allow", []))
 
-        existing = set(settings.get("permissions", {}).get("allow", []))
+        new_global = sorted(global_patterns - existing_global)
+        if new_global:
+            project_count = {p: len(pattern_projects[p]) for p in new_global}
+            print(f"\n  GLOBAL: {global_path}", file=sys.stderr)
+            for pattern in new_global:
+                print(f"    + {pattern}  ({project_count[pattern]} projects)", file=sys.stderr)
 
-        new_patterns = []
-        for pattern, count, risk in patterns:
-            if pattern not in existing:
-                new_patterns.append((pattern, count, risk))
+            if not dry_run:
+                if "permissions" not in global_settings:
+                    global_settings["permissions"] = {}
+                if "allow" not in global_settings["permissions"]:
+                    global_settings["permissions"]["allow"] = []
+                global_settings["permissions"]["allow"].extend(new_global)
+                _write_settings(global_path, global_settings, dry_run)
 
-        if not new_patterns:
-            continue
+            total_added += len(new_global)
 
-        print(f"\n  {short_project_name(project)}: {settings_path}", file=sys.stderr)
-        for pattern, count, risk in new_patterns:
-            print(f"    + {pattern}  ({count} approvals, {risk})", file=sys.stderr)
-
-        if not dry_run:
-            if "permissions" not in settings:
-                settings["permissions"] = {}
-            if "allow" not in settings["permissions"]:
-                settings["permissions"]["allow"] = []
-
-            for pattern, count, risk in new_patterns:
-                settings["permissions"]["allow"].append(pattern)
-
-            if not settings_path.parent.exists():
-                print(f"    Skipping: {settings_path.parent} does not exist", file=sys.stderr)
+    # --- Per-project settings ---
+    if scope in ("project", "both"):
+        for project, patterns in sorted(by_project.items()):
+            settings_path = project_settings_path(project)
+            if settings_path is None:
                 continue
-            with open(settings_path, "w") as f:
-                json.dump(settings, f, indent=2)
-                f.write("\n")
 
-        total_added += len(new_patterns)
+            settings = _load_settings(settings_path)
+            existing = set(settings.get("permissions", {}).get("allow", []))
 
-    action = "Would add" if dry_run else "Added"
-    print(f"\n  {action} {total_added} patterns across {len(by_project)} projects.", file=sys.stderr)
+            new_patterns = []
+            for pattern, count, risk in patterns:
+                if scope == "both" and pattern in global_patterns:
+                    continue
+                if pattern not in existing:
+                    new_patterns.append((pattern, count, risk))
+
+            if not new_patterns:
+                continue
+
+            print(f"\n  {short_project_name(project)}: {settings_path}", file=sys.stderr)
+            for pattern, count, risk in new_patterns:
+                print(f"    + {pattern}  ({count} approvals, {risk})", file=sys.stderr)
+
+            if not dry_run:
+                if "permissions" not in settings:
+                    settings["permissions"] = {}
+                if "allow" not in settings["permissions"]:
+                    settings["permissions"]["allow"] = []
+                for pattern, count, risk in new_patterns:
+                    settings["permissions"]["allow"].append(pattern)
+                _write_settings(settings_path, settings, dry_run)
+
+            total_added += len(new_patterns)
+
+    if scope == "global":
+        action = "Would add" if dry_run else "Added"
+        print(f"\n  {action} {total_added} global patterns.", file=sys.stderr)
+    else:
+        n_targets = len(by_project) + (1 if global_patterns else 0)
+        action = "Would add" if dry_run else "Added"
+        scope_label = "globally + per-project" if scope == "both" else "per-project"
+        print(f"\n  {action} {total_added} patterns ({scope_label}).", file=sys.stderr)
 
 
 # --- Main ---
@@ -1387,9 +1453,17 @@ def main():
         const="read-only",
         default=None,
         choices=["read-only", "mutating"],
-        help="Write suggested patterns to settings.local.json. "
+        help="Write suggested patterns to settings files. "
              "Default: only read-only commands. 'mutating' includes mutating too. "
              "Never auto-applies destructive patterns.",
+    )
+    parser.add_argument(
+        "--scope",
+        default="project",
+        choices=["project", "global", "both"],
+        help="With --apply: 'project' writes to each project's settings.local.json (default), "
+             "'global' consolidates patterns appearing in 3+ projects into ~/.claude/settings.json, "
+             "'both' writes global patterns to settings.json and project-specific ones to settings.local.json.",
     )
     parser.add_argument(
         "--dry-run",
@@ -1503,14 +1577,14 @@ def main():
             print("Use --dry-run to preview changes, or run interactively.", file=sys.stderr)
             sys.exit(1)
         if not args.dry_run:
-            apply_suggestions(all_records, risk_level=args.apply, dry_run=True)
+            apply_suggestions(all_records, risk_level=args.apply, dry_run=True, scope=args.scope)
             answer = input("\n  Apply these changes? [y/N] ").strip().lower()
             if answer != "y":
                 print("Aborted.", file=sys.stderr)
                 return
-            apply_suggestions(all_records, risk_level=args.apply, dry_run=False)
+            apply_suggestions(all_records, risk_level=args.apply, dry_run=False, scope=args.scope)
         else:
-            apply_suggestions(all_records, risk_level=args.apply, dry_run=True)
+            apply_suggestions(all_records, risk_level=args.apply, dry_run=True, scope=args.scope)
     else:
         if args.summary:
             renderer = render_summary
