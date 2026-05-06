@@ -1,0 +1,17 @@
+# Auto-detect text files and normalize line endings
+* text=auto
+
+# Python
+*.py text diff=python
+
+# Shell
+*.sh text eol=lf
+
+# Markdown
+*.md text diff=markdown
+
+# JSON
+*.json text
+
+# HCL templates
+*.hcl.j2 text
