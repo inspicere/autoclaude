@@ -214,8 +214,45 @@ Add to `hooks` in `~/.claude/settings.json`:
 ### Known limitations and mitigations
 
 - **Copy-then-read**: The hook blocks `cp`, `mv`, `ln`, `install`, and `rsync` when the source is a sensitive path, preventing the first step of a copy-then-read chain. However, if a sensitive file was copied to a non-sensitive path *before* the hook was installed, the copy is not tracked. For defense in depth, use filesystem-level controls (mandatory access control, audit logging) on sensitive files.
-- **Output capture**: The hook inspects commands *before* execution but cannot inspect command *output*. A `vault kv get` that prints secrets to stdout will not be blocked. **Mitigation:** Use MCP servers for secret access — auth stays server-side and secrets never appear in tool call arguments or session transcripts. For Vault specifically, the `vault` MCP server is the recommended path. Where CLI access is unavoidable, a PostToolUse hook could scan command output (not included in this project).
+- **Output capture**: The PreToolUse hook inspects commands *before* execution but cannot inspect command *output*. A `vault kv get` that prints secrets to stdout will not be blocked by it. **Mitigation:** The `warn-secrets-output.py` PostToolUse hook scans Bash output for known token patterns, JWTs, and private key material, then warns Claude not to use the values and advises the user to rotate. MCP servers remain the preferred path — auth stays server-side and secrets never enter the session.
 - **Encoded payloads**: Base64-encoded or obfuscated secrets that don't match known token patterns and fall below the entropy threshold (Shannon entropy < 3.5 on 32+ char strings) will pass through. **Mitigation:** Lowering the entropy threshold increases false positives on legitimate base64 data. A decode-then-rescan approach is possible but adds latency and complexity. The current threshold is a pragmatic balance — most real secrets exceed 3.5 bits/char.
+
+## PostToolUse hook: warn-secrets-output.py
+
+The `hooks/warn-secrets-output.py` script is a PostToolUse hook that scans Bash command output for leaked secrets. It cannot prevent the leak (the command already ran) but blocks Claude from using the exposed values and warns about rotation.
+
+### Install
+
+Add to `hooks` in `~/.claude/settings.json` alongside the PreToolUse hook:
+
+```json
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /path/to/autoclaude/hooks/warn-secrets-output.py"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+### What it detects
+
+- 22 provider-specific token patterns (same as the PreToolUse hook)
+- JWT tokens, private key headers
+
+### What it exempts
+
+- Grep-family command output (searching for patterns, not leaking secrets)
+- Git diff/log/show output (reviewing code that contains pattern definitions)
+- Python/test script output (running the hook's own test suite)
 
 ## Recommended deny rules
 

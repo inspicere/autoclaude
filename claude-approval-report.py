@@ -1259,11 +1259,11 @@ def render_generate_settings(all_records, out=None):
     if out is None:
         out = sys.stdout
 
-    hook_path = Path(__file__).resolve().parent / "hooks" / "block-secrets.py"
-    if hook_path.exists():
-        hook_cmd = f"python3 {hook_path}"
-    else:
-        hook_cmd = "python3 <PATH_TO>/hooks/block-secrets.py"
+    hooks_dir = Path(__file__).resolve().parent / "hooks"
+    pre_hook = hooks_dir / "block-secrets.py"
+    post_hook = hooks_dir / "warn-secrets-output.py"
+    pre_cmd = f"python3 {pre_hook}" if pre_hook.exists() else "python3 <PATH_TO>/hooks/block-secrets.py"
+    post_cmd = f"python3 {post_hook}" if post_hook.exists() else "python3 <PATH_TO>/hooks/warn-secrets-output.py"
 
     settings = {
         "permissions": {
@@ -1273,12 +1273,13 @@ def render_generate_settings(all_records, out=None):
             "PreToolUse": [
                 {
                     "matcher": "Bash|Read|Edit",
-                    "hooks": [
-                        {
-                            "type": "command",
-                            "command": hook_cmd,
-                        },
-                    ],
+                    "hooks": [{"type": "command", "command": pre_cmd}],
+                },
+            ],
+            "PostToolUse": [
+                {
+                    "matcher": "Bash",
+                    "hooks": [{"type": "command", "command": post_cmd}],
                 },
             ],
         },
@@ -1326,12 +1327,13 @@ def render_generate_settings(all_records, out=None):
     else:
         print(f"\n  No session data analyzed (use --since/--project to include).", file=sys.stderr)
 
-    print(f"\n  Hook: {hook_cmd}", file=sys.stderr)
+    print(f"\n  PreToolUse hook: {pre_cmd}", file=sys.stderr)
+    print(f"  PostToolUse hook: {post_cmd}", file=sys.stderr)
     print(f"  Merge the JSON output into ~/.claude/settings.json to enable protection.", file=sys.stderr)
     print(f"\n  Residual risks (mitigations in README):", file=sys.stderr)
     print(f"    - Pre-existing copies: files copied before hook install aren't tracked", file=sys.stderr)
     print(f"      → Use filesystem-level MAC/audit on sensitive paths", file=sys.stderr)
-    print(f"    - Output capture: commands that print secrets to stdout (e.g. vault kv get)", file=sys.stderr)
+    print(f"    - Output capture: PostToolUse hook warns but cannot prevent (command already ran)", file=sys.stderr)
     print(f"      → Use MCP servers for secret access instead of CLI", file=sys.stderr)
     print(f"    - Encoded payloads: obfuscated secrets below entropy threshold", file=sys.stderr)
     print(f"      → Most real secrets exceed the 3.5 bits/char threshold\n", file=sys.stderr)

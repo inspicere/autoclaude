@@ -47,6 +47,14 @@ The hook covers gaps that deny rules cannot:
 2. Sensitive file reads via Bash (`cat .env`) that bypass Read tool deny rules
 3. Bypass vectors: subshell wrapping (`bash -c`), `eval`, interpreter file I/O (`python3 -c "open('.env')"`), file copy/move/link (`cp .env /tmp/x`), `dd if=`, stdin redirection (`< .env`)
 
+## PostToolUse hook (`hooks/warn-secrets-output.py`)
+
+A self-contained PostToolUse hook that scans Bash command output for leaked secrets (known token patterns, JWTs, private key headers). Cannot prevent the leak but emits `decision: "block"` with a warning to avoid using the values and advise credential rotation. Exempts grep-family, git diff/log/show, and test script output to avoid false positives.
+
+## Vault token renewal (`scripts/vault-token-renew.sh`)
+
+Weekly cron job that runs `vault token renew` to extend the terrabot CLI token. Logs to `/var/log/laima/vault-renew.log`. The token has a 768h TTL and is renewable.
+
 ## Reference settings (`settings/recommended-deny.json`)
 
 26 baseline deny patterns for Read/Write/Edit plus a hook config template. The `BASELINE_DENY_RULES` list in the main script mirrors this file — they should be kept in sync.
