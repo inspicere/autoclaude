@@ -15,9 +15,11 @@ python3 claude-approval-report.py --why "git push"  # diagnose a specific comman
 python3 claude-approval-report.py --apply --dry-run  # preview allowlist changes
 python3 claude-approval-report.py --json --since 7d --project laima  # filtered JSON
 python3 claude-approval-report.py --generate-settings  # deny rules + hook config
+python3 claude-approval-report.py --session current --summary  # latest session only
+python3 claude-approval-report.py -o           # write to auto-named timestamped file
 ```
 
-No dependencies beyond Python 3.8+ stdlib.
+No dependencies beyond Python 3.8+ stdlib. No test suite — verify changes by running the script against live session data in `~/.claude/projects/`.
 
 ## Architecture
 
@@ -47,3 +49,7 @@ The hook covers two gaps that deny rules cannot:
 ## Reference settings (`settings/recommended-deny.json`)
 
 26 baseline deny patterns for Read/Write/Edit plus a hook config template. The `BASELINE_DENY_RULES` list in the main script mirrors this file — they should be kept in sync.
+
+## Auth guide (`docs/auth-best-practices.md`)
+
+Documents safe patterns for working with authenticated services (Vault, SSH, GitHub) when the hook and deny rules are active. Reference this when adding new secret patterns or modifying detection logic to ensure the documented workarounds remain valid.
