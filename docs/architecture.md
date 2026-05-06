@@ -157,12 +157,12 @@ To deploy this in a different environment:
 2. **Hook** — Install `hooks/block-secrets.py` and add the hook entry to `~/.claude/settings.json`:
    ```json
    {
-     "hooks": [{
-       "type": "command",
-       "hookEventName": "PreToolUse",
-       "command": "python3 /path/to/hooks/block-secrets.py",
-       "matcher": { "tools": ["Bash", "Read", "Edit"] }
-     }]
+     "hooks": {
+       "PreToolUse": [{
+         "matcher": "Bash|Read|Edit",
+         "hooks": [{"type": "command", "command": "python3 /path/to/hooks/block-secrets.py"}]
+       }]
+     }
    }
    ```
 
