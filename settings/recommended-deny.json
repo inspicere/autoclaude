@@ -29,14 +29,17 @@
       "Edit(**/.ssh/id_*)"
     ]
   },
-  "hooks": [
-    {
-      "type": "command",
-      "hookEventName": "PreToolUse",
-      "command": "python3 <AUTOCLAUDE_DIR>/hooks/block-secrets.py",
-      "matcher": {
-        "tools": ["Bash", "Read", "Edit"]
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Read|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 <AUTOCLAUDE_DIR>/hooks/block-secrets.py"
+          }
+        ]
       }
-    }
-  ]
+    ]
+  }
 }

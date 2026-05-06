@@ -1203,16 +1203,19 @@ def render_generate_settings(all_records, out=None):
         "permissions": {
             "deny": list(BASELINE_DENY_RULES),
         },
-        "hooks": [
-            {
-                "type": "command",
-                "hookEventName": "PreToolUse",
-                "command": hook_cmd,
-                "matcher": {
-                    "tools": ["Bash", "Read", "Edit"],
+        "hooks": {
+            "PreToolUse": [
+                {
+                    "matcher": "Bash|Read|Edit",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": hook_cmd,
+                        },
+                    ],
                 },
-            },
-        ],
+            ],
+        },
     }
 
     print(f"\nRecommended security settings", file=sys.stderr)
@@ -1258,7 +1261,11 @@ def render_generate_settings(all_records, out=None):
         print(f"\n  No session data analyzed (use --since/--project to include).", file=sys.stderr)
 
     print(f"\n  Hook: {hook_cmd}", file=sys.stderr)
-    print(f"  Merge the JSON output into ~/.claude/settings.json to enable protection.\n", file=sys.stderr)
+    print(f"  Merge the JSON output into ~/.claude/settings.json to enable protection.", file=sys.stderr)
+    print(f"\n  Known limitations (not covered by deny rules or hook):", file=sys.stderr)
+    print(f"    - Copy-then-read: cp .env /tmp/x && cat /tmp/x (no file lineage tracking)", file=sys.stderr)
+    print(f"    - Output capture: commands that print secrets to stdout (e.g. vault kv get)", file=sys.stderr)
+    print(f"    - Encoded payloads: obfuscated secrets below entropy threshold\n", file=sys.stderr)
 
     json.dump(settings, out, indent=2)
     out.write("\n")
