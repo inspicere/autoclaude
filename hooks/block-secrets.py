@@ -105,6 +105,10 @@ _FILE_READERS = frozenset({
     'strings', 'xxd', 'od', 'hexdump', 'base64', 'source', '.',
 })
 
+_FILE_COPIERS = frozenset({
+    'cp', 'mv', 'ln', 'install', 'rsync',
+})
+
 
 def _shannon_entropy(data):
     if not data:
@@ -227,6 +231,14 @@ def _check_bash_file_access(command):
                 continue
             if _is_sensitive_path(arg):
                 return f"Command reads sensitive file: {arg}"
+
+    # File copiers: cp, mv, ln, install, rsync — block if source is sensitive
+    if base in _FILE_COPIERS:
+        args = [a for a in parts[1:] if not a.startswith('-')]
+        sources = args[:-1] if len(args) >= 2 else args
+        for src in sources:
+            if _is_sensitive_path(src):
+                return f"Command copies/moves sensitive file: {src}"
 
     # dd if=<path>
     if base == 'dd':

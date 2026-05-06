@@ -184,6 +184,7 @@ Add to `hooks` in `~/.claude/settings.json`:
 - Subshell wrapping (`bash -c 'cat .env'`, `sh -c`, `zsh -c`) — unwraps and recursively re-checks
 - Eval wrapping (`eval 'cat .env'`) — unwraps and recursively re-checks
 - Interpreter file I/O (`python3 -c "open('.env').read()"`, `perl -e`, `ruby -e`, `node -e`) — detects `open()`, `File.read()`, and sensitive path references in inline scripts
+- File copy/move/link commands (`cp .env /tmp/x`, `mv`, `ln`, `install`, `rsync`) — blocks when source is a sensitive path
 - `dd if=<sensitive-path>` — parses the `if=` parameter
 - Shell stdin redirection (`< .env`, `while read line; do ...; done < .env`)
 - Read/Edit tool calls targeting the same sensitive paths
@@ -196,11 +197,11 @@ Add to `hooks` in `~/.claude/settings.json`:
 - Short/placeholder values (`PASSWORD=changeme`)
 - Normal file operations on non-sensitive paths
 
-### Known limitations
+### Known limitations and mitigations
 
-- **Copy-then-read**: A command like `cp .env /tmp/safe.txt && cat /tmp/safe.txt` copies a sensitive file to a non-sensitive path, then reads it. The hook cannot track file lineage across commands — this requires filesystem-level controls (e.g., mandatory access control, audit logging).
-- **Output capture**: The hook inspects commands *before* execution but cannot inspect command *output*. A `vault kv get` that prints secrets to stdout will not be blocked.
-- **Encoded payloads**: Base64-encoded or obfuscated secrets that don't match known token patterns and fall below the entropy threshold will pass through.
+- **Copy-then-read**: The hook blocks `cp`, `mv`, `ln`, `install`, and `rsync` when the source is a sensitive path, preventing the first step of a copy-then-read chain. However, if a sensitive file was copied to a non-sensitive path *before* the hook was installed, the copy is not tracked. For defense in depth, use filesystem-level controls (mandatory access control, audit logging) on sensitive files.
+- **Output capture**: The hook inspects commands *before* execution but cannot inspect command *output*. A `vault kv get` that prints secrets to stdout will not be blocked. **Mitigation:** Use MCP servers for secret access — auth stays server-side and secrets never appear in tool call arguments or session transcripts. For Vault specifically, the `vault` MCP server is the recommended path. Where CLI access is unavoidable, a PostToolUse hook could scan command output (not included in this project).
+- **Encoded payloads**: Base64-encoded or obfuscated secrets that don't match known token patterns and fall below the entropy threshold (Shannon entropy < 3.5 on 32+ char strings) will pass through. **Mitigation:** Lowering the entropy threshold increases false positives on legitimate base64 data. A decode-then-rescan approach is possible but adds latency and complexity. The current threshold is a pragmatic balance — most real secrets exceed 3.5 bits/char.
 
 ## Recommended deny rules
 

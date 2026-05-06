@@ -46,6 +46,11 @@ This document shows how the protection layers in this project fit together, usin
 │  • High-entropy blobs    │
 │  • Bash file reads of    │
 │    sensitive paths       │
+│  • File copy/move/link   │
+│    of sensitive paths    │
+│  • Subshell/eval/interp  │
+│    unwrap + re-check     │
+│  • Stdin redirection     │
 │                          │
 │ Exempts:                 │
 │  • grep/rg/ag/ack/find   │
@@ -63,12 +68,16 @@ This document shows how the protection layers in this project fit together, usin
 | `Read .env` | **blocks** | — | — |
 | `Edit ~/.ssh/id_rsa` | **blocks** | — | — |
 | `cat .env` (via Bash) | — | **blocks** | — |
+| `cp .env /tmp/x` (via Bash) | — | **blocks** | — |
+| `bash -c 'cat .env'` (subshell) | — | **blocks** | — |
+| `python3 -c "open('.env').read()"` | — | **blocks** | — |
 | `VAULT_TOKEN=hvs.xxx vault kv get` | — | **blocks** | — |
 | `curl -H "Authorization: Bearer <literal>"` | — | **blocks** | — |
 | Need to read a Vault secret | — | — | **safe path** |
 | Need to query Forgejo API | — | — | **safe path** |
 | `grep PASSWORD .env` | allowed | exempt | — |
 | `$TOKEN` variable reference | allowed | exempt | — |
+| `vault kv get` (output has secrets) | — | not covered | **safe path** |
 
 ## Homelab deployment
 

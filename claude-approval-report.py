@@ -1262,10 +1262,13 @@ def render_generate_settings(all_records, out=None):
 
     print(f"\n  Hook: {hook_cmd}", file=sys.stderr)
     print(f"  Merge the JSON output into ~/.claude/settings.json to enable protection.", file=sys.stderr)
-    print(f"\n  Known limitations (not covered by deny rules or hook):", file=sys.stderr)
-    print(f"    - Copy-then-read: cp .env /tmp/x && cat /tmp/x (no file lineage tracking)", file=sys.stderr)
+    print(f"\n  Residual risks (mitigations in README):", file=sys.stderr)
+    print(f"    - Pre-existing copies: files copied before hook install aren't tracked", file=sys.stderr)
+    print(f"      → Use filesystem-level MAC/audit on sensitive paths", file=sys.stderr)
     print(f"    - Output capture: commands that print secrets to stdout (e.g. vault kv get)", file=sys.stderr)
-    print(f"    - Encoded payloads: obfuscated secrets below entropy threshold\n", file=sys.stderr)
+    print(f"      → Use MCP servers for secret access instead of CLI", file=sys.stderr)
+    print(f"    - Encoded payloads: obfuscated secrets below entropy threshold", file=sys.stderr)
+    print(f"      → Most real secrets exceed the 3.5 bits/char threshold\n", file=sys.stderr)
 
     json.dump(settings, out, indent=2)
     out.write("\n")
