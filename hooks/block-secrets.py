@@ -174,6 +174,42 @@ def _check_command_secrets(command):
     return None
 
 
+_RE_STDIN_REDIRECT = re.compile(
+    r'<\s*([^\s<>&|;]+)'
+)
+
+_RE_SHELL_EXEC = re.compile(
+    r'\b(?:bash|sh|zsh)\s+-c\s+["\'](.+?)["\']'
+    r'|'
+    r'\b(?:bash|sh|zsh)\s+-c\s+(\S+)',
+    re.DOTALL,
+)
+
+_RE_EVAL = re.compile(
+    r'\beval\s+["\'](.+?)["\']'
+    r'|'
+    r'\beval\s+(.+)',
+    re.DOTALL,
+)
+
+_RE_INTERP_FILE_READ = re.compile(
+    r'''(?:open|Path)\s*\(\s*['"]([^'"]+)['"]'''
+    r'''|File\.(?:read|open)\s*\(\s*['"]([^'"]+)['"]'''
+    r'''|open\s*\(\s*\w+\s*,\s*['"](?:<\s*)?['"]?\s*,\s*['"]([^'"]+)['"]'''
+    r'''|open\s+\w+\s*,\s*['"]?([^'";\s]+)['"]?'''
+)
+
+_INTERPRETERS = frozenset({'python3', 'python', 'perl', 'ruby', 'node'})
+
+
+def _check_sensitive_paths_in_text(text):
+    """Scan arbitrary text for sensitive file paths. Returns first match or None."""
+    for token in re.findall(r'[/~.][\w./_-]+', text):
+        if _is_sensitive_path(token):
+            return token
+    return None
+
+
 def _check_bash_file_access(command):
     """Check if a Bash command reads sensitive files. Returns reason string or None."""
     cmd = re.sub(r'^(cd\s+(?:\S+|"[^"]*"|\'[^\']*\')\s*&&\s*)+', '', command.strip())
@@ -183,14 +219,60 @@ def _check_bash_file_access(command):
         return None
 
     base = os.path.basename(parts[0])
-    if base not in _FILE_READERS:
-        return None
 
-    for arg in parts[1:]:
-        if arg.startswith('-'):
-            continue
-        if _is_sensitive_path(arg):
-            return f"Command reads sensitive file: {arg}"
+    # Direct file readers: cat, head, tail, etc.
+    if base in _FILE_READERS:
+        for arg in parts[1:]:
+            if arg.startswith('-'):
+                continue
+            if _is_sensitive_path(arg):
+                return f"Command reads sensitive file: {arg}"
+
+    # dd if=<path>
+    if base == 'dd':
+        for arg in parts[1:]:
+            if arg.startswith('if='):
+                path = arg[3:]
+                if _is_sensitive_path(path):
+                    return f"Command reads sensitive file via dd: {path}"
+
+    # eval '<inner command>' — unwrap and re-check
+    if base == 'eval':
+        m = _RE_EVAL.search(cmd)
+        if m:
+            inner = m.group(1) or m.group(2)
+            if inner:
+                result = _check_bash_file_access(inner)
+                if result:
+                    return f"eval wraps blocked command: {result}"
+
+    # bash -c / sh -c / zsh -c — unwrap and re-check
+    for m in _RE_SHELL_EXEC.finditer(cmd):
+        inner = m.group(1) or m.group(2)
+        if inner:
+            result = _check_bash_file_access(inner)
+            if result:
+                return f"Subshell wraps blocked command: {result}"
+
+    # Interpreter file reads: python3 -c, perl -e, ruby -e
+    if base in _INTERPRETERS:
+        for i, arg in enumerate(parts[1:], 1):
+            if arg in ('-c', '-e') and i + 1 <= len(parts) - 1:
+                script = ' '.join(parts[i + 1:])
+                for fm in _RE_INTERP_FILE_READ.finditer(script):
+                    path = fm.group(1) or fm.group(2) or fm.group(3) or fm.group(4)
+                    if path and _is_sensitive_path(path):
+                        return f"Interpreter reads sensitive file: {path}"
+                sensitive = _check_sensitive_paths_in_text(script)
+                if sensitive:
+                    return f"Interpreter script references sensitive file: {sensitive}"
+                break
+
+    # Shell stdin redirection: < /path/to/sensitive
+    for m in _RE_STDIN_REDIRECT.finditer(command):
+        path = m.group(1).strip("\"'")
+        if _is_sensitive_path(path):
+            return f"Stdin redirection from sensitive file: {path}"
 
     return None
 
