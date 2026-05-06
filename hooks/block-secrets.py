@@ -5,12 +5,12 @@ Catches two classes of leaks that deny rules alone cannot prevent:
   1. Embedded secrets in Bash commands (tokens, JWTs, auth headers, high-entropy blobs)
   2. Sensitive file reads via Bash (cat .env, head ~/.ssh/id_rsa) that bypass Read deny rules
 
-Install by adding to hooks[] in ~/.claude/settings.json:
-  {
-    "type": "command",
-    "hookEventName": "PreToolUse",
-    "command": "python3 /path/to/hooks/block-secrets.py",
-    "matcher": {"tools": ["Bash", "Read", "Edit"]}
+Install by adding to hooks in ~/.claude/settings.json:
+  "hooks": {
+    "PreToolUse": [{
+      "matcher": "Bash|Read|Edit",
+      "hooks": [{"type": "command", "command": "python3 /path/to/hooks/block-secrets.py"}]
+    }]
   }
 
 Blocks by exiting with code 2 (stderr shown to user). Exits 0 to allow.

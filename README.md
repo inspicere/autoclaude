@@ -154,20 +154,23 @@ The `hooks/block-secrets.py` script is a Claude Code PreToolUse hook that blocks
 
 ### Install
 
-Add to `hooks[]` in `~/.claude/settings.json`:
+Add to `hooks` in `~/.claude/settings.json`:
 
 ```json
 {
-  "hooks": [
-    {
-      "type": "command",
-      "hookEventName": "PreToolUse",
-      "command": "python3 /path/to/autoclaude/hooks/block-secrets.py",
-      "matcher": {
-        "tools": ["Bash", "Read", "Edit"]
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Read|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /path/to/autoclaude/hooks/block-secrets.py"
+          }
+        ]
       }
-    }
-  ]
+    ]
+  }
 }
 ```
 
@@ -178,6 +181,11 @@ Add to `hooks[]` in `~/.claude/settings.json`:
 - Secret variable assignments (`VAULT_TOKEN=s.xxx`) with smart filtering to avoid false positives on variable references and URLs
 - High-entropy base64 blobs (Shannon entropy >= 3.5)
 - File-reading commands (`cat`, `head`, `tail`, `base64`, etc.) targeting sensitive paths (`.env*`, `.ssh/id_*`, `.aws/credentials`, `/etc/shadow`, etc.)
+- Subshell wrapping (`bash -c 'cat .env'`, `sh -c`, `zsh -c`) — unwraps and recursively re-checks
+- Eval wrapping (`eval 'cat .env'`) — unwraps and recursively re-checks
+- Interpreter file I/O (`python3 -c "open('.env').read()"`, `perl -e`, `ruby -e`, `node -e`) — detects `open()`, `File.read()`, and sensitive path references in inline scripts
+- `dd if=<sensitive-path>` — parses the `if=` parameter
+- Shell stdin redirection (`< .env`, `while read line; do ...; done < .env`)
 - Read/Edit tool calls targeting the same sensitive paths
 
 ### What it allows
@@ -187,6 +195,12 @@ Add to `hooks[]` in `~/.claude/settings.json`:
 - URLs in assignments (`CALLBACK=https://example.com`)
 - Short/placeholder values (`PASSWORD=changeme`)
 - Normal file operations on non-sensitive paths
+
+### Known limitations
+
+- **Copy-then-read**: A command like `cp .env /tmp/safe.txt && cat /tmp/safe.txt` copies a sensitive file to a non-sensitive path, then reads it. The hook cannot track file lineage across commands — this requires filesystem-level controls (e.g., mandatory access control, audit logging).
+- **Output capture**: The hook inspects commands *before* execution but cannot inspect command *output*. A `vault kv get` that prints secrets to stdout will not be blocked.
+- **Encoded payloads**: Base64-encoded or obfuscated secrets that don't match known token patterns and fall below the entropy threshold will pass through.
 
 ## Recommended deny rules
 
