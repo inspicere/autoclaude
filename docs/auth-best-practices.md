@@ -18,15 +18,24 @@ The deny rules block Read/Write/Edit of `.env*`, `.pem`, `.key`, `.ssh/id_*`, `.
 
 ## Quick reference
 
+**Blocked — use the safe alternative:**
+
 | Blocked | Use instead |
 |---------|-------------|
-| `VAULT_TOKEN=hvs.xxx vault kv get secret/db` | `vault kv get secret/db` (agent/file token) |
+| `VAULT_TOKEN=hvs.xxx vault kv get secret/db` | `vault kv get secret/db` (reads `~/.vault-token`) |
 | `curl -H "Authorization: Token abc123..."` | `curl -n` with `.netrc`, or wrapper script |
-| `curl -H "Authorization: Bearer $TOKEN"` | This is fine — variable reference, not a literal |
 | `cat .env` | `grep SPECIFIC_VAR .env` (grep is exempt) |
 | `export API_KEY=sk-ant-api03-...` | `export API_KEY=$(vault kv get -field=key secret/api)` |
 | `DD_TOKEN="d688..." curl ...` | Source from file or Vault, use MCP server |
-| `ansible-vault view file.yml --vault-password-file ~/.ansible-vault-password` | This works — the flag points to a file path |
+
+**Allowed — these look risky but are fine:**
+
+| Command | Why it's allowed |
+|---------|-----------------|
+| `curl -H "Authorization: Bearer $TOKEN"` | Variable reference, not a literal |
+| `ansible-vault view file.yml --vault-password-file ~/.ansible-vault-password` | Flag points to a file path, no inline secret |
+| `ssh -i ~/.ssh/deploy_key user@host` | Key path, not key content |
+| `grep PASSWORD .env` | Grep-family commands are exempt from secret scanning |
 
 ## Guides by service
 
