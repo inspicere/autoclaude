@@ -63,21 +63,21 @@ This document shows how the protection layers in this project fit together, usin
 
 ## What each layer protects against
 
-| Scenario | Deny Rules | Hook | MCP Servers |
-|----------|:----------:|:----:|:-----------:|
-| `Read .env` | **blocks** | — | — |
-| `Edit ~/.ssh/id_rsa` | **blocks** | — | — |
-| `cat .env` (via Bash) | — | **blocks** | — |
-| `cp .env /tmp/x` (via Bash) | — | **blocks** | — |
-| `bash -c 'cat .env'` (subshell) | — | **blocks** | — |
-| `python3 -c "open('.env').read()"` | — | **blocks** | — |
-| `VAULT_TOKEN=hvs.xxx vault kv get` | — | **blocks** | — |
-| `curl -H "Authorization: Bearer <literal>"` | — | **blocks** | — |
-| Need to read a Vault secret | — | — | **safe path** |
-| Need to query Forgejo API | — | — | **safe path** |
-| `grep PASSWORD .env` | allowed | exempt | — |
-| `$TOKEN` variable reference | allowed | exempt | — |
-| `vault kv get` (output has secrets) | — | not covered | **safe path** |
+| Scenario | Deny Rules | PreToolUse | PostToolUse | MCP Servers |
+|----------|:----------:|:----------:|:-----------:|:-----------:|
+| `Read .env` | **blocks** | — | — | — |
+| `Edit ~/.ssh/id_rsa` | **blocks** | — | — | — |
+| `cat .env` (via Bash) | — | **blocks** | — | — |
+| `cp .env /tmp/x` (via Bash) | — | **blocks** | — | — |
+| `bash -c 'cat .env'` (subshell) | — | **blocks** | — | — |
+| `python3 -c "open('.env').read()"` | — | **blocks** | — | — |
+| `VAULT_TOKEN=hvs.xxx vault kv get` | — | **blocks** | — | — |
+| `curl -H "Authorization: Bearer <literal>"` | — | **blocks** | — | — |
+| `vault kv get` (output has secrets) | — | — | **warns** | **safe path** |
+| Need to read a Vault secret | — | — | — | **safe path** |
+| Need to query Forgejo API | — | — | — | **safe path** |
+| `grep PASSWORD .env` | allowed | exempt | exempt | — |
+| `$TOKEN` variable reference | allowed | exempt | — | — |
 
 ## Homelab deployment
 

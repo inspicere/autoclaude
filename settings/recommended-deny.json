@@ -40,6 +40,17 @@
           }
         ]
       }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 <AUTOCLAUDE_DIR>/hooks/warn-secrets-output.py"
+          }
+        ]
+      }
     ]
   }
 }
