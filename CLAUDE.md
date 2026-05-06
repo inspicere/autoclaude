@@ -34,7 +34,7 @@ Everything lives in `claude-approval-report.py`. The processing pipeline:
 7. **Generate settings** (`render_generate_settings`) — emits deny rules + hook config as a mergeable JSON fragment, with data-driven analysis of actual secret exposures via `_find_secret_exposures`
 
 Key design choices:
-- The `HOME_SLUG` constant (`-home-terrabot`) maps between Claude's project directory names and actual filesystem paths. `project_settings_path` handles slug-to-path resolution including dot-to-dash normalization.
+- `HOME_SLUG` is dynamically computed from `Path.home()` (e.g., `-home-terrabot` on this system) and maps between Claude's project directory names and actual filesystem paths. `project_settings_path` handles slug-to-path resolution including dot-to-dash normalization.
 - Secret detection is intentionally aggressive — false positives are preferred over missed secrets. Grep-family commands are excluded from secret scanning since they search *for* patterns rather than *using* them.
 - `suggest_pattern_applicable` returns a single pattern safe for JSON (choosing the second option from "or" suggestions like SSH patterns).
 
@@ -50,6 +50,10 @@ The hook covers two gaps that deny rules cannot:
 
 26 baseline deny patterns for Read/Write/Edit plus a hook config template. The `BASELINE_DENY_RULES` list in the main script mirrors this file — they should be kept in sync.
 
-## Auth guide (`docs/auth-best-practices.md`)
+## Documentation (`docs/`)
 
-Documents safe patterns for working with authenticated services (Vault, SSH, GitHub) when the hook and deny rules are active. Reference this when adding new secret patterns or modifying detection logic to ensure the documented workarounds remain valid.
+- **`auth-best-practices.md`** — index and quick reference for working with authenticated services when the hook and deny rules are active. Links to per-service guides:
+  - `auth-vault.md`, `auth-api-services.md`, `auth-ansible.md`, `auth-ssh.md`, `auth-env-vars.md`, `auth-diskless-secrets.md`
+- **`architecture.md`** — reference architecture showing how deny rules, the hook, and MCP servers form a layered defense, with homelab deployment diagrams and adaptation instructions.
+
+Reference these docs when adding new secret patterns or modifying detection logic to ensure the documented workarounds remain valid.
