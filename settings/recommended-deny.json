@@ -1,0 +1,42 @@
+{
+  "permissions": {
+    "deny": [
+      "Read(**/.env*)",
+      "Read(**/.dev.vars*)",
+      "Read(**/*.pem)",
+      "Read(**/*.key)",
+      "Read(**/*.p12)",
+      "Read(**/*.pfx)",
+      "Read(**/secrets/**)",
+      "Read(**/credentials/**)",
+      "Read(**/.aws/**)",
+      "Read(**/.ssh/id_*)",
+      "Read(**/.vault-token)",
+      "Read(**/.vault_token)",
+      "Read(**/.npmrc)",
+      "Read(**/.pypirc)",
+      "Read(**/credentials.json)",
+      "Read(**/.kube/config)",
+      "Read(**/.docker/config.json)",
+      "Read(**/.netrc)",
+      "Read(**/.pgpass)",
+      "Read(**/.ansible-vault-password*)",
+      "Write(**/.env*)",
+      "Write(**/secrets/**)",
+      "Write(**/.ssh/**)",
+      "Edit(**/.env*)",
+      "Edit(**/secrets/**)",
+      "Edit(**/.ssh/id_*)"
+    ]
+  },
+  "hooks": [
+    {
+      "type": "command",
+      "hookEventName": "PreToolUse",
+      "command": "python3 <AUTOCLAUDE_DIR>/hooks/block-secrets.py",
+      "matcher": {
+        "tools": ["Bash", "Read", "Edit"]
+      }
+    }
+  ]
+}

@@ -17,7 +17,7 @@ Claude Code stores session transcripts as JSONL files under `~/.claude/projects/
 1. Loads permission allowlists from global and per-project settings
 2. Parses every session JSONL file across all projects in `~/.claude/projects/`
 3. Classifies each tool call as **auto-allowed** (matched an allowlist pattern), **prompted & approved**, or **rejected**
-4. Classifies each tool call by **risk level** — destructive, mutating, or read-only — using curated command lists with flag-aware logic for git, curl, find, sed, and ansible-playbook; detects secret/key material exposure in command arguments
+4. Classifies each tool call by **risk level** — destructive, mutating, or read-only — using curated command lists with flag-aware logic for git, curl, find, sed, and ansible-playbook; detects secret/key material exposure via 22 provider-specific token patterns (GitHub, AWS, Vault, Slack, Anthropic, etc.), JWT detection, curl auth headers, and Shannon entropy-gated base64 blob detection
 5. Groups commands by normalized prefix (e.g. all `git add` variants together, all `ssh` to the same host together)
 6. Filters noise entries (shell syntax fragments, comment/shebang lines, IP addresses, flags) from prompted commands report
 7. Renders ranked tables: most prompted, most rejected, risk breakdown, destructive approvals, auto-allowed risky commands, suggested allowlist additions, per-project summary, and tool type breakdown
@@ -73,7 +73,7 @@ python3 claude-approval-report.py --apply mutating
 python3 claude-approval-report.py --apply --since 7d --project laima --dry-run
 ```
 
-The `--apply` flag writes frequently-approved patterns directly to each project's `.claude/settings.local.json`. By default only read-only commands are applied. Destructive patterns are never auto-applied.
+The `--apply` flag writes frequently-approved patterns directly to each project's `.claude/settings.local.json`. By default only read-only commands are applied. Destructive patterns are never auto-applied. Without `--dry-run`, a confirmation prompt is shown before changes are written.
 
 ### Summary mode
 
@@ -85,7 +85,7 @@ python3 claude-approval-report.py --summary
 python3 claude-approval-report.py --brief
 ```
 
-Shows call counts, risk breakdown, secret exposure count, top 5 prompted commands, and top 3 suggestions. Composes with `--since`, `--project`, and `--session`.
+Shows call counts, risk breakdown, secret exposure count, top 5 prompted commands, and top 3 suggestions. When secrets are detected, a warning is displayed advising rotation (secrets are persisted in JSONL files and were sent to the Claude API). Composes with `--since`, `--project`, and `--session`.
 
 ### Command lookup
 
@@ -126,6 +126,78 @@ python3 claude-approval-report.py --json --since 7d --project laima | jq '.risk'
 ```
 
 Status messages go to stderr, so JSON output is clean for piping.
+
+### Security settings generation
+
+```
+# Generate recommended deny rules + hook config (JSON to stdout, commentary to stderr)
+python3 claude-approval-report.py --generate-settings
+
+# Save to file
+python3 claude-approval-report.py --generate-settings --output security-settings.json
+
+# Data-driven: analyze recent sessions to quantify secret exposures
+python3 claude-approval-report.py --generate-settings --since 30d
+
+# Pipe JSON directly (stderr commentary doesn't interfere)
+python3 claude-approval-report.py --generate-settings | jq '.permissions.deny'
+```
+
+Outputs a JSON fragment with deny rules and hook configuration ready to merge into `~/.claude/settings.json`. The stderr commentary shows which rules are already configured, what's new, and how many secret exposures the hook would have blocked.
+
+## PreToolUse hook: block-secrets.py
+
+The `hooks/block-secrets.py` script is a Claude Code PreToolUse hook that blocks commands before execution. It catches two classes of leaks that deny rules alone cannot prevent:
+
+1. **Embedded secrets in Bash commands** — API tokens, JWTs, private keys, auth headers, high-entropy blobs
+2. **Sensitive file reads via Bash** — `cat .env`, `head ~/.ssh/id_rsa`, etc. that bypass Read deny rules
+
+### Install
+
+Add to `hooks[]` in `~/.claude/settings.json`:
+
+```json
+{
+  "hooks": [
+    {
+      "type": "command",
+      "hookEventName": "PreToolUse",
+      "command": "python3 /path/to/autoclaude/hooks/block-secrets.py",
+      "matcher": {
+        "tools": ["Bash", "Read", "Edit"]
+      }
+    }
+  ]
+}
+```
+
+### What it detects
+
+- 22 provider-specific token patterns (GitHub, AWS, Vault, Anthropic, Slack, Stripe, etc.)
+- JWT tokens, private key headers, curl Authorization headers
+- Secret variable assignments (`VAULT_TOKEN=s.xxx`) with smart filtering to avoid false positives on variable references and URLs
+- High-entropy base64 blobs (Shannon entropy >= 3.5)
+- File-reading commands (`cat`, `head`, `tail`, `base64`, etc.) targeting sensitive paths (`.env*`, `.ssh/id_*`, `.aws/credentials`, `/etc/shadow`, etc.)
+- Read/Edit tool calls targeting the same sensitive paths
+
+### What it allows
+
+- Grep-family commands (searching for patterns, not using secrets)
+- Variable references (`export TOKEN=$TOKEN`)
+- URLs in assignments (`CALLBACK=https://example.com`)
+- Short/placeholder values (`PASSWORD=changeme`)
+- Normal file operations on non-sensitive paths
+
+## Recommended deny rules
+
+`settings/recommended-deny.json` contains a reference set of 26 deny patterns covering Read/Write/Edit access to sensitive file types. Use `--generate-settings` to see which ones are already in your config and what's missing.
+
+Deny rules protect the Read/Write/Edit tools. The hook protects Bash commands. Together they form a layered defense:
+
+| Layer | Protects against | Limitation |
+|-------|-----------------|------------|
+| Deny rules | `Read .env`, `Edit ~/.ssh/id_rsa` | Cannot inspect Bash commands |
+| Hook | `cat .env`, `VAULT_TOKEN=hvs.xxx ...` | Only runs on tool calls, not manual shell |
 
 ## Example output
 

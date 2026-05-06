@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import math
 import os
 import re
 import sys
@@ -18,6 +19,109 @@ HOME_SLUG = "-" + str(Path.home()).lstrip("/").replace("/", "-")
 _RE_CD_PREFIX = re.compile(r'^(cd\s+(?:\S+|"[^"]*"|\'[^\']*\')\s*&&\s*)+')
 _RE_ENV_PREFIX = re.compile(r'^(\w+=(?:\S+|"[^"]*"|\'[^\']*\')\s+)+')
 _RE_SHELL_OPS = re.compile(r'^[&|;]+\s*')
+
+# --- Secret detection (patterns derived from gitleaks) ---
+
+_RE_SECRET_ASSIGN = re.compile(
+    r'([\w]*(?:API_KEY|SECRET|TOKEN|PASSWORD|PRIVATE_KEY|CREDENTIAL|_AUTH|AUTH_)[\w]*)'
+    r'=\s*(\S+)',
+    re.IGNORECASE,
+)
+
+# Tokens with unique prefixes — zero false positives, no entropy check needed
+_PREFIXED_TOKEN_PATTERNS = re.compile(
+    r'(?:'
+    r'ghp_[0-9a-zA-Z]{36}'                           # GitHub PAT
+    r'|github_pat_\w{82}'                             # GitHub fine-grained PAT
+    r'|(?:ghu|ghs)_[0-9a-zA-Z]{36}'                  # GitHub app tokens
+    r'|glpat-[\w-]{20}'                               # GitLab PAT
+    r'|sk-ant-(?:api03|admin01)-[a-zA-Z0-9_\-]{93}AA' # Anthropic API key
+    r'|sk-(?:proj|svcacct|admin)-[A-Za-z0-9_\-]{58,}'  # OpenAI API key (prefix)
+    r'|sk-[a-zA-Z0-9]{20}T3BlbkFJ[a-zA-Z0-9]{20}'   # OpenAI API key (legacy)
+    r'|(?:A3T[A-Z0-9]|AKIA|ASIA|ABIA|ACCA)[A-Z2-7]{16}' # AWS access key
+    r'|AIza[\w-]{35}'                                 # GCP API key
+    r'|hvs\.[\w-]{90,120}'                            # Vault service token
+    r'|hvb\.[\w-]{138,300}'                           # Vault batch token
+    r'|xox[bpe]-[0-9]{10,13}-[\w-]+'                  # Slack tokens
+    r'|SG\.[\w=_\-.]{66}'                             # SendGrid API key
+    r'|(?:sk|rk)_(?:test|live|prod)_[a-zA-Z0-9]{10,99}' # Stripe key
+    r'|npm_[a-z0-9]{36}'                              # npm access token
+    r'|hf_[a-zA-Z]{34}'                               # HuggingFace token
+    r'|pplx-[a-zA-Z0-9]{48}'                          # Perplexity API key
+    r'|dop_v1_[a-f0-9]{64}'                           # DigitalOcean PAT
+    r'|ntn_[0-9]{11}[A-Za-z0-9]{35}'                  # Notion API token
+    r'|glsa_[A-Za-z0-9]{32}_[A-Fa-f0-9]{8}'           # Grafana service account
+    r'|pypi-AgEIcHlwaS5vcmc[\w-]{50,}'                # PyPI upload token
+    r'|HRKU-AA[0-9a-zA-Z_-]{58}'                      # Heroku API key
+    r')',
+)
+
+_RE_JWT = re.compile(
+    r'\bey[a-zA-Z0-9]{17,}\.ey[a-zA-Z0-9/\\_-]{17,}\.[a-zA-Z0-9/\\_-]{10,}=?=?'
+)
+
+_RE_PRIVATE_KEY = re.compile(
+    r'-----BEGIN[ A-Z0-9_-]{0,100}PRIVATE KEY(?:\s+BLOCK)?-----'
+)
+
+_RE_CURL_AUTH = re.compile(
+    r'\bcurl\b.*?\s(?:-H|--header)\s*[=\s]*["\']'
+    r'(?:Authorization:\s*(?:Basic\s+|(?:Bearer|Token)\s+))',
+    re.IGNORECASE,
+)
+
+_RE_BASE64_BLOB = re.compile(r'[A-Za-z0-9+/=]{32,}')
+_RE_BEARER = re.compile(r'(Bearer\s+)\S+', re.IGNORECASE)
+
+
+def _shannon_entropy(data):
+    if not data:
+        return 0.0
+    counts = {}
+    for c in data:
+        counts[c] = counts.get(c, 0) + 1
+    length = len(data)
+    return -sum((n / length) * math.log2(n / length) for n in counts.values())
+
+
+def _has_secret_token(text):
+    """Check if text contains a known secret pattern. Returns True if found."""
+    if _PREFIXED_TOKEN_PATTERNS.search(text):
+        return True
+    if _RE_JWT.search(text):
+        return True
+    if _RE_PRIVATE_KEY.search(text):
+        return True
+    return False
+
+
+def _has_high_entropy_blob(tokens):
+    """Check if any token looks like a high-entropy secret (base64 blob with entropy >= 3.5)."""
+    for token in tokens:
+        clean = token.strip("\"'")
+        if clean.startswith(("/", ".", "~")):
+            continue
+        if len(clean) >= 32 and re.match(r'^[A-Za-z0-9+/=]+$', clean):
+            if _shannon_entropy(clean) >= 3.5:
+                return True
+    return False
+
+
+def redact_secrets(text):
+    """Redact likely secrets from command text."""
+    text = _PREFIXED_TOKEN_PATTERNS.sub('<REDACTED>', text)
+    text = _RE_JWT.sub('<REDACTED-JWT>', text)
+    text = _RE_SECRET_ASSIGN.sub(lambda m: f'{m.group(1)}=<REDACTED>', text)
+    text = _RE_BEARER.sub(r'\1<REDACTED>', text)
+    def _redact_b64(m):
+        val = m.group(0)
+        if val.startswith(("/", ".", "~")):
+            return val
+        if _shannon_entropy(val) >= 3.5:
+            return '<REDACTED>'
+        return val
+    text = _RE_BASE64_BLOB.sub(_redact_b64, text)
+    return text
 
 
 def short_project_name(project):
@@ -103,10 +207,11 @@ READ_ONLY_COMMANDS = {
 }
 
 # Git subcommands that override the base "mutating" classification
-GIT_DESTRUCTIVE_SUBCMDS = {
-    "push --force", "push -f", "push --force-with-lease",
-    "reset --hard", "clean -f", "clean -fd", "clean -fx",
-    "branch -D",
+GIT_DESTRUCTIVE_FLAGS = {
+    "push": {"--force", "-f", "--force-with-lease"},
+    "reset": {"--hard"},
+    "clean": {"--force", "-f"},
+    "branch": {"-D"},
 }
 GIT_READ_ONLY_SUBCMDS = {
     "status", "log", "diff", "show", "branch", "tag", "remote",
@@ -120,8 +225,8 @@ GIT_READ_ONLY_SUBCMDS = {
 def classify_risk(tool_name, tool_input):
     """Classify a tool call as destructive/mutating/read-only."""
     if tool_name == "Bash":
-        cmd = tool_input.get("command", "").strip()
-        cmd = _RE_CD_PREFIX.sub('', cmd)
+        raw_cmd = tool_input.get("command", "").strip()
+        cmd = _RE_CD_PREFIX.sub('', raw_cmd)
         cmd = _RE_ENV_PREFIX.sub('', cmd)
         cmd = _RE_SHELL_OPS.sub('', cmd)
         parts = cmd.split()
@@ -132,25 +237,29 @@ def classify_risk(tool_name, tool_input):
         # Strip trailing punctuation from parsing artifacts
         base = base.rstrip('"\')}')
 
-        # Detect secret/key material exposure (not in grep/search contexts)
+        # Detect secret/key material exposure — scan the full original command
+        # so env-var prefixes like VAULT_TOKEN=hvs.xxx aren't missed
         if base not in ("grep", "egrep", "fgrep", "rg", "ag", "ack", "find"):
-            for token in parts[1:]:
-                clean = token.strip("\"'")
-                # Standalone base64 blobs that look like keys (no path separators)
-                if len(clean) >= 40 and "/" not in clean and re.match(r'^[A-Za-z0-9+/=]+$', clean):
-                    return "destructive"
-                # Inline secret assignments: VAR=<value> where VAR names a secret
-                if re.match(r'^([\w]*)(API_KEY|SECRET|TOKEN|PASSWORD|PRIVATE_KEY|CREDENTIAL)([\w]*)=.+', clean, re.IGNORECASE):
-                    return "destructive"
+            if _has_secret_token(raw_cmd):
+                return "destructive"
+            if _RE_CURL_AUTH.search(raw_cmd):
+                return "destructive"
+            if _RE_SECRET_ASSIGN.search(raw_cmd):
+                return "destructive"
+            raw_parts = raw_cmd.split()
+            if len(raw_parts) > 1 and _has_high_entropy_blob(raw_parts[1:]):
+                return "destructive"
 
         # Git subcommand-aware classification
         if base == "git" and len(parts) > 1:
             subcmd = parts[1]
-            # Check for destructive flag combos
-            rest = " ".join(parts[1:])
-            for pattern in GIT_DESTRUCTIVE_SUBCMDS:
-                if rest.startswith(pattern):
-                    return "destructive"
+            if subcmd in GIT_DESTRUCTIVE_FLAGS:
+                rest_args = parts[2:]
+                for arg in rest_args:
+                    if arg in GIT_DESTRUCTIVE_FLAGS[subcmd]:
+                        return "destructive"
+                    if subcmd == "clean" and arg.startswith("-") and not arg.startswith("--") and "f" in arg:
+                        return "destructive"
             if subcmd in GIT_READ_ONLY_SUBCMDS:
                 return "read-only"
             return "mutating"
@@ -164,10 +273,13 @@ def classify_risk(tool_name, tool_input):
                 return "mutating"
             return "read-only"
 
-        # sed with -i is mutating, otherwise read-only
+        # sed with -i (including -i.bak, -ni, etc.) is mutating, otherwise read-only
         if base == "sed":
-            if "-i" in parts:
-                return "mutating"
+            for arg in parts[1:]:
+                if arg == "--in-place":
+                    return "mutating"
+                if arg.startswith("-") and not arg.startswith("--") and "i" in arg:
+                    return "mutating"
             return "read-only"
 
         # ansible-playbook with --check/--syntax-check is read-only
@@ -206,8 +318,11 @@ def classify_risk(tool_name, tool_input):
             return "mutating"
         # Bare key material / secret references parsed as "commands"
         clean_base = base.strip("\"'^)")
-        if len(clean_base) >= 40 and re.match(r'^[A-Za-z0-9+/=]+$', clean_base):
+        if _PREFIXED_TOKEN_PATTERNS.match(clean_base):
             return "destructive"
+        if len(clean_base) >= 32 and re.match(r'^[A-Za-z0-9+/=]+$', clean_base):
+            if _shannon_entropy(clean_base) >= 3.5:
+                return "destructive"
         if re.match(r'^[\w]*(API_KEY|_SECRET|_TOKEN|_PASSWORD|PRIVATE_KEY|CREDENTIAL)[\w]*$', clean_base.upper()):
             return "destructive"
         return "unknown"
@@ -410,9 +525,9 @@ def get_tool_display(tool_name, tool_input):
 
 
 def get_tool_full_command(tool_name, tool_input):
-    """Get the full command string for detailed display."""
+    """Get the full command string for detailed display (secrets redacted)."""
     if tool_name == "Bash":
-        return tool_input.get("command", "")[:300]
+        return redact_secrets(tool_input.get("command", "")[:300])
     elif tool_name in ("Read", "Write", "Edit"):
         return tool_input.get("file_path", "")
     return ""
@@ -532,6 +647,61 @@ def _is_noise_command(display):
     return False
 
 
+_SECRET_KEYWORDS_RE = re.compile(
+    r'(API_KEY|SECRET|TOKEN|PASSWORD|PRIVATE_KEY|CREDENTIAL)', re.IGNORECASE
+)
+
+
+def _find_secret_exposures(records):
+    """Find records where secrets were exposed in commands.
+
+    Returns list of (record, category) tuples where category is one of:
+    token, jwt, private_key, auth_header, secret_assign, high_entropy.
+    """
+    results = []
+    for r in records:
+        if r["rejected"]:
+            continue
+        if r["tool_name"] != "Bash":
+            continue
+        cmd = r["tool_input"].get("command", "")
+
+        stripped = _RE_CD_PREFIX.sub('', cmd.strip())
+        stripped = _RE_ENV_PREFIX.sub('', stripped)
+        parts = stripped.split()
+        if parts and os.path.basename(parts[0]) in (
+            "grep", "egrep", "fgrep", "rg", "ag", "ack", "find",
+        ):
+            continue
+
+        if _PREFIXED_TOKEN_PATTERNS.search(cmd):
+            results.append((r, "token"))
+        elif _RE_JWT.search(cmd):
+            results.append((r, "jwt"))
+        elif _RE_PRIVATE_KEY.search(cmd):
+            results.append((r, "private_key"))
+        elif _RE_CURL_AUTH.search(cmd):
+            results.append((r, "auth_header"))
+        elif _RE_SECRET_ASSIGN.search(cmd):
+            results.append((r, "secret_assign"))
+        elif len(cmd.split()) > 1 and _has_high_entropy_blob(cmd.split()[1:]):
+            results.append((r, "high_entropy"))
+
+    return results
+
+
+def _count_secret_exposures(records):
+    """Count records where secrets were exposed in command arguments."""
+    return len(_find_secret_exposures(records))
+
+
+SECRET_WARNING = (
+    "WARNING: These secrets are already written to disk in session JSONL files\n"
+    "  (~/.claude/projects/) and were sent to the Claude API. They should be\n"
+    "  rotated and considered compromised."
+)
+
+
 def render_report(all_records, out=None):
     """Render the analysis report. Writes to out (file object) or stdout."""
     if out is None:
@@ -591,7 +761,7 @@ def render_report(all_records, out=None):
             fc = r["full_command"]
             if fc and fc not in seen:
                 seen.add(fc)
-                _print(f"  [{r['project']}] {r['tool_name']}: {fc}")
+                _print(f"  [{short_project_name(r['project'])}] {r['tool_name']}: {fc}")
                 shown += 1
                 if shown >= 10:
                     break
@@ -621,6 +791,12 @@ def render_report(all_records, out=None):
         count = risk_counts.get(level, 0)
         pct = (count / total * 100) if total else 0
         _print(f"  {level:<15} {count:>8,}  ({pct:>5.1f}%)")
+
+    secret_count = _count_secret_exposures(all_records)
+    if secret_count:
+        _print()
+        _print(f"  Secret exposures: {secret_count} commands contained secrets/keys/tokens")
+        _print(f"  {SECRET_WARNING}")
     _print()
 
     # --- High-risk approvals ---
@@ -882,11 +1058,18 @@ def parse_time_filter(value):
         sys.exit(1)
 
 
+def _normalize_ts(ts):
+    """Normalize timestamp for string comparison: convert Z suffix to +00:00."""
+    if ts.endswith("Z"):
+        return ts[:-1] + "+00:00"
+    return ts
+
+
 def filter_records(records, since=None, project=None):
     """Filter records by time and/or project."""
     if since:
         cutoff_str = since.isoformat()
-        records = [r for r in records if r["timestamp"] >= cutoff_str]
+        records = [r for r in records if _normalize_ts(r.get("timestamp", "")) >= cutoff_str]
     if project:
         full_name = HOME_SLUG + "-" + project
         records = [r for r in records if r["project"] == full_name]
@@ -952,12 +1135,10 @@ def render_summary(all_records, out=None):
     _print(f"  Calls: {total:,} total | {auto:,} auto | {len(prompted):,} prompted | {rejected:,} rejected")
     _print(f"  Risk:  {risk_counts.get('destructive',0)} destructive | {risk_counts.get('mutating',0):,} mutating | {risk_counts.get('read-only',0):,} read-only | {risk_counts.get('unknown',0)} unknown")
 
-    secret_count = sum(1 for r in all_records
-                       if r["risk"] == "destructive" and not r["rejected"]
-                       and re.search(r'(API_KEY|SECRET|TOKEN|PASSWORD|PRIVATE_KEY|CREDENTIAL)',
-                                     r.get("full_command", ""), re.IGNORECASE))
+    secret_count = _count_secret_exposures(all_records)
     if secret_count:
         _print(f"  Secrets: {secret_count} secret-exposure commands approved")
+        _print(f"  {SECRET_WARNING}")
 
     prompt_counts = Counter(r["display"] for r in prompted)
     _print("\n  Top prompted:")
@@ -975,6 +1156,112 @@ def render_summary(all_records, out=None):
         _print("\n  Top suggestions:")
         for i, (count, project, cmd, pattern, risk) in enumerate(suggestions[:3], 1):
             _print(f"    {i}. {pattern:<40} ({count} approvals, {risk})")
+
+
+BASELINE_DENY_RULES = [
+    "Read(**/.env*)",
+    "Read(**/.dev.vars*)",
+    "Read(**/*.pem)",
+    "Read(**/*.key)",
+    "Read(**/*.p12)",
+    "Read(**/*.pfx)",
+    "Read(**/secrets/**)",
+    "Read(**/credentials/**)",
+    "Read(**/.aws/**)",
+    "Read(**/.ssh/id_*)",
+    "Read(**/.vault-token)",
+    "Read(**/.vault_token)",
+    "Read(**/.npmrc)",
+    "Read(**/.pypirc)",
+    "Read(**/credentials.json)",
+    "Read(**/.kube/config)",
+    "Read(**/.docker/config.json)",
+    "Read(**/.netrc)",
+    "Read(**/.pgpass)",
+    "Read(**/.ansible-vault-password*)",
+    "Write(**/.env*)",
+    "Write(**/secrets/**)",
+    "Write(**/.ssh/**)",
+    "Edit(**/.env*)",
+    "Edit(**/secrets/**)",
+    "Edit(**/.ssh/id_*)",
+]
+
+
+def render_generate_settings(all_records, out=None):
+    """Generate recommended deny rules and hook config based on session analysis."""
+    if out is None:
+        out = sys.stdout
+
+    hook_path = Path(__file__).resolve().parent / "hooks" / "block-secrets.py"
+    if hook_path.exists():
+        hook_cmd = f"python3 {hook_path}"
+    else:
+        hook_cmd = "python3 <PATH_TO>/hooks/block-secrets.py"
+
+    settings = {
+        "permissions": {
+            "deny": list(BASELINE_DENY_RULES),
+        },
+        "hooks": [
+            {
+                "type": "command",
+                "hookEventName": "PreToolUse",
+                "command": hook_cmd,
+                "matcher": {
+                    "tools": ["Bash", "Read", "Edit"],
+                },
+            },
+        ],
+    }
+
+    print(f"\nRecommended security settings", file=sys.stderr)
+    print(f"  Deny rules: {len(BASELINE_DENY_RULES)} patterns (Read/Write/Edit for sensitive files)", file=sys.stderr)
+
+    global_settings = load_global_settings()
+    existing_deny = set(global_settings.get("permissions", {}).get("deny", []))
+    new_deny = [r for r in BASELINE_DENY_RULES if r not in existing_deny]
+    already = len(BASELINE_DENY_RULES) - len(new_deny)
+
+    if existing_deny:
+        print(f"  Already in ~/.claude/settings.json: {already} of {len(BASELINE_DENY_RULES)}", file=sys.stderr)
+        if new_deny:
+            print(f"  New additions:", file=sys.stderr)
+            for rule in new_deny:
+                print(f"    + {rule}", file=sys.stderr)
+        else:
+            print(f"  All baseline deny rules already configured.", file=sys.stderr)
+
+    if all_records:
+        exposures = _find_secret_exposures(all_records)
+        if exposures:
+            print(f"\n  Session analysis: {len(exposures)} secret exposure(s) found", file=sys.stderr)
+
+            category_labels = {
+                "token": "Known token patterns",
+                "jwt": "JWT tokens",
+                "private_key": "Private key material",
+                "auth_header": "Authorization headers",
+                "secret_assign": "Secret variable assignments",
+                "high_entropy": "High-entropy blobs",
+            }
+            by_category = Counter(cat for _, cat in exposures)
+            for cat, count in by_category.most_common():
+                label = category_labels.get(cat, cat)
+                print(f"    {label}: {count} (blocked by hook)", file=sys.stderr)
+
+            print(f"\n  The PreToolUse hook would have blocked all {len(exposures)} exposure(s).", file=sys.stderr)
+            print(f"  Deny rules alone cannot prevent embedded secrets in Bash commands.", file=sys.stderr)
+        else:
+            print(f"\n  Session analysis: no secret exposures found in analyzed sessions.", file=sys.stderr)
+    else:
+        print(f"\n  No session data analyzed (use --since/--project to include).", file=sys.stderr)
+
+    print(f"\n  Hook: {hook_cmd}", file=sys.stderr)
+    print(f"  Merge the JSON output into ~/.claude/settings.json to enable protection.\n", file=sys.stderr)
+
+    json.dump(settings, out, indent=2)
+    out.write("\n")
 
 
 def render_why(query, all_records):
@@ -1118,6 +1405,14 @@ def main():
         metavar="ID",
         help="Analyze a specific session. 'current' for most recent, or a session UUID.",
     )
+    parser.add_argument(
+        "--generate-settings",
+        action="store_true",
+        default=False,
+        help="Generate recommended deny rules and hook config. "
+             "Outputs JSON settings fragment to stdout. "
+             "Combine with --since/--project for data-driven analysis.",
+    )
     args = parser.parse_args()
 
     since = parse_time_filter(args.since) if args.since else None
@@ -1159,7 +1454,7 @@ def main():
 
     all_records = filter_records(all_records, since=since, project=args.project)
 
-    if not all_records:
+    if not all_records and not args.generate_settings:
         print("No tool call data found.", file=sys.stderr)
         sys.exit(1)
 
@@ -1173,12 +1468,39 @@ def main():
     if active_filters:
         print(f"Filters: {', '.join(active_filters)}", file=sys.stderr)
 
+    if args.generate_settings:
+        if args.output is None:
+            render_generate_settings(all_records)
+        else:
+            if args.output == "auto":
+                out_path = f"claude-security-settings-{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H%M%SZ')}.json"
+            elif os.path.isdir(args.output):
+                out_path = os.path.join(args.output, f"claude-security-settings-{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H%M%SZ')}.json")
+            else:
+                out_path = args.output
+            with open(out_path, "w") as f:
+                render_generate_settings(all_records, out=f)
+            print(f"Settings written to {out_path}", file=sys.stderr)
+        return
+
     if args.why:
         render_why(args.why, all_records)
         return
 
     if args.apply is not None:
-        apply_suggestions(all_records, risk_level=args.apply, dry_run=args.dry_run)
+        if not args.dry_run and not sys.stdin.isatty():
+            print("Error: --apply requires an interactive terminal for confirmation.", file=sys.stderr)
+            print("Use --dry-run to preview changes, or run interactively.", file=sys.stderr)
+            sys.exit(1)
+        if not args.dry_run:
+            apply_suggestions(all_records, risk_level=args.apply, dry_run=True)
+            answer = input("\n  Apply these changes? [y/N] ").strip().lower()
+            if answer != "y":
+                print("Aborted.", file=sys.stderr)
+                return
+            apply_suggestions(all_records, risk_level=args.apply, dry_run=False)
+        else:
+            apply_suggestions(all_records, risk_level=args.apply, dry_run=True)
     else:
         if args.summary:
             renderer = render_summary
