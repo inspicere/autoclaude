@@ -8,7 +8,7 @@ Claude to avoid using the secret and warns the user to rotate.
 Install by adding to hooks in ~/.claude/settings.json:
   "hooks": {
     "PostToolUse": [{
-      "matcher": "Bash",
+      "matcher": "Bash|Read|Edit",
       "hooks": [{"type": "command", "command": "python3 /path/to/hooks/warn-secrets-output.py"}]
     }]
   }
@@ -57,12 +57,15 @@ _RE_PRIVATE_KEY = re.compile(
     r'-----BEGIN[ A-Z0-9_-]{0,100}PRIVATE KEY(?:\s+BLOCK)?-----'
 )
 
-# Commands whose output is expected to contain secret-like patterns
 _EXEMPT_COMMANDS = re.compile(
     r'^\s*(?:grep|egrep|fgrep|rg|ag|ack)\b'
-    r'|^\s*(?:cat|head|tail|less)\s+.*(?:block-secrets|claude-approval-report|README|CLAUDE\.md|\.py\b|\.md\b|\.json\b)'
+    r'|^\s*(?:cat|head|tail|less)\s+.*(?:block-secrets|claude-approval-report|warn-secrets|README|CLAUDE\.md)'
     r'|^\s*python3\s+.*(?:block-secrets|claude-approval-report|test_hook)'
     r'|^\s*git\s+(?:diff|log|show)\b'
+)
+
+_EXEMPT_FILE_PATHS = re.compile(
+    r'(?:block-secrets|claude-approval-report|warn-secrets|README|CLAUDE\.md)'
 )
 
 
@@ -101,11 +104,19 @@ def main():
         sys.exit(0)
 
     tool_name = data.get("tool_name", "")
-    if tool_name != "Bash":
-        sys.exit(0)
+    tool_input = data.get("tool_input", {})
 
-    command = data.get("tool_input", {}).get("command", "")
-    if _EXEMPT_COMMANDS.search(command):
+    if tool_name == "Bash":
+        command = tool_input.get("command", "")
+        if _EXEMPT_COMMANDS.search(command):
+            sys.exit(0)
+        source_desc = f"The command `{command[:80]}`"
+    elif tool_name in ("Read", "Edit"):
+        file_path = tool_input.get("file_path", "")
+        if file_path and _EXEMPT_FILE_PATHS.search(file_path):
+            sys.exit(0)
+        source_desc = f"Reading `{file_path}`"
+    else:
         sys.exit(0)
 
     result = data.get("tool_result", "")
@@ -123,7 +134,7 @@ def main():
         "decision": "block",
         "reason": (
             f"SECRET IN OUTPUT: {types}. "
-            f"The command `{command[:80]}` produced output containing secrets. "
+            f"{source_desc} produced output containing secrets. "
             f"These are now in the session transcript and were sent to the API. "
             f"Do NOT repeat, store, or use these values. "
             f"Advise the user to rotate the exposed credentials."
