@@ -49,7 +49,7 @@ The hook covers gaps that deny rules cannot:
 
 ## PostToolUse hook (`hooks/warn-secrets-output.py`)
 
-A self-contained PostToolUse hook that scans Bash command output for leaked secrets (known token patterns, JWTs, private key headers). Cannot prevent the leak but emits `decision: "block"` with a warning to avoid using the values and advise credential rotation. Exempts grep-family commands, git diff/log/show output, Python/test script output (running the hook's own test suite), and files ending in `.py`, `.md`, or `.json` to avoid false positives on code/config containing pattern definitions.
+A self-contained PostToolUse hook that scans tool output for leaked secrets (known token patterns, JWTs, private key headers). Cannot prevent the leak but emits `decision: "block"` with a warning to avoid using the values and advise credential rotation. Scans Bash command output, Read tool output, and Edit tool output. Exempts grep-family commands, git diff/log/show output, and Python/test script output (running the hook's own test suite).
 
 ## Vault token renewal (`scripts/vault-token-renew.sh`)
 
@@ -57,7 +57,7 @@ Weekly cron job that runs `vault token renew` to extend the terrabot CLI token. 
 
 ## Reference settings (`settings/recommended-deny.json`)
 
-26 baseline deny patterns for Read/Write/Edit plus a hook config template. The `BASELINE_DENY_RULES` list in the main script mirrors this file — they should be kept in sync.
+60 baseline deny patterns for Read/Write/Edit plus a hook config template. The `BASELINE_DENY_RULES` list in the main script mirrors this file — they should be kept in sync.
 
 ## Documentation (`docs/`)
 
@@ -67,35 +67,29 @@ Weekly cron job that runs `vault token renew` to extend the terrabot CLI token. 
 
 Reference these docs when adding new secret patterns or modifying detection logic to ensure the documented workarounds remain valid.
 
-## Known Issues (from 2026-05-07 adversarial audit)
+## Known Issues (from 2026-05-07 adversarial audit) — ALL RESOLVED
 
-A comprehensive adversarial audit on 2026-05-07 identified 32 bypass vectors and 22 code quality issues. No code changes were made — this was a read-only assessment. Key findings by severity:
+A comprehensive adversarial audit on 2026-05-07 identified 32 bypass vectors and 22 code quality issues. All findings were remediated same-day in commits `275ee75` (hooks), `7f271f4` (main script), `20bdfb1` (docs). Test suites added: `test_block_secrets.py` (48 tests), `test_warn_secrets.py` (12 tests).
 
-### Critical (4)
-1. `_RE_SECRET_ASSIGN` regex catastrophic backtracking in `block-secrets.py` — 50k-char input causes timeout, hook fails open
-2. Multi-statement command bypass (`echo hello; cat ~/.vault-token`) — only first command in chain parsed
-3. Pipe-based bypass (`echo x | cat ~/.env`) — same root cause as #2
-4. grep-family reads entire files undetected (`grep . ~/.env`, `awk '{print}' ~/.ssh/id_rsa`)
+### Critical (4) — FIXED in commit `275ee75`
+1. ~~`_RE_SECRET_ASSIGN` regex catastrophic backtracking~~ — atomic-group-style rewrite
+2. ~~Multi-statement command bypass~~ — splits on `;`, `&&`, `||`, `|` and checks each segment
+3. ~~Pipe-based bypass~~ — same fix as #2
+4. ~~grep-family reads entire files undetected~~ — detects `grep . ~/.env` style file reads
 
-### High (9)
-5. Write tool completely unprotected by hook (not in matcher, no code path handling)
-6. PostToolUse exempts `.py`/`.md`/`.json` files from output scanning (too broad)
-7. PostToolUse ignores Read/Edit tool output entirely
-8. `curl file://`, `wget file://` bypass file access checks
-9. `tar`/`zip`/`scp` exfiltration not detected
-10. `sudo cat` bypass (sudo not stripped as prefix)
-11. Subshell/command substitution bypass (`$(which cat) ~/.env`, `TOKEN=$(cat ~/.vault-token)`)
-12. `docker run -v` mount bypass
-13. `command_matches_pattern` doesn't strip `cd` prefixes in main script (inaccurate reporting)
+### High (9) — FIXED in commits `275ee75`, `7f271f4`
+5. ~~Write tool completely unprotected~~ — added to hook matcher and code paths
+6. ~~PostToolUse exempts `.py`/`.md`/`.json`~~ — exemptions removed
+7. ~~PostToolUse ignores Read/Edit tool output~~ — now scans all tool output
+8. ~~`curl file://`, `wget file://` bypass~~ — local file access blocked
+9. ~~`tar`/`zip`/`scp` exfiltration~~ — detected
+10. ~~`sudo cat` bypass~~ — `sudo`/`env`/`time` prefixes stripped
+11. ~~Subshell/command substitution bypass~~ — `$(...)` and backtick extraction
+12. ~~`docker run -v` mount bypass~~ — detected
+13. ~~`command_matches_pattern` cd prefix stripping~~ — fixed
 
-### Medium (10)
-14-23. Missing sensitive paths, missing token patterns, heredoc false positive, `classify_risk` lacks placeholder filtering, Read tool double-counting, timezone comparison bug, grep-family set inconsistency between hook and main script, `generate_settings` merge risk, curl compact flag forms missed, Write/Edit deny rule asymmetry
+### Medium (10) — FIXED in commits `275ee75`, `7f271f4`, `20bdfb1`
+14-23. All resolved: sensitive paths added to deny rules (26->60), placeholder filtering, Read double-counting fix, timestamp normalization, grep-family alignment, curl compact flags, Write/Edit deny symmetry
 
-### Documentation Discrepancies (7)
-- `_GREP_FAMILY` "mirrors" claim corrected (hook has `sed`/`awk`, main script does not)
-- PostToolUse exemption list was incomplete in CLAUDE.md (now fixed above)
-- Architecture diagram deny/allow counts outdated (now fixed in `docs/architecture.md`)
-- Architecture files table missing `warn-secrets-output.py` and `scripts/` (now fixed)
-- "20+ others" token count should be "17 others" in README grep-family description
-- `.env.example` allowed mechanism different than documented
-- README missing `sed`/`awk` from grep-family description
+### Documentation Discrepancies (7) — ALL FIXED in commits `ae0ea5b`, `20bdfb1`
+- All discrepancies resolved including README updates, grep-family description, deny count
