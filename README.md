@@ -175,7 +175,7 @@ Add to `hooks` in `~/.claude/settings.json`:
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Bash|Read|Edit",
+        "matcher": "Bash|Read|Edit|Write",
         "hooks": [
           {
             "type": "command",
@@ -205,7 +205,7 @@ Add to `hooks` in `~/.claude/settings.json`:
 
 ### What it allows
 
-- Grep-family commands (searching for patterns, not using secrets)
+- Grep-family commands including sed/awk (searching for patterns, not using secrets) — though file arguments are still checked against sensitive paths
 - Variable references (`export TOKEN=$TOKEN`)
 - URLs in assignments (`CALLBACK=https://example.com`)
 - Short/placeholder values (`PASSWORD=changeme`)
@@ -230,7 +230,7 @@ Add to `hooks` in `~/.claude/settings.json` alongside the PreToolUse hook:
   "hooks": {
     "PostToolUse": [
       {
-        "matcher": "Bash",
+        "matcher": "Bash|Read|Edit",
         "hooks": [
           {
             "type": "command",
@@ -247,16 +247,17 @@ Add to `hooks` in `~/.claude/settings.json` alongside the PreToolUse hook:
 
 - 22 provider-specific token patterns (same as the PreToolUse hook)
 - JWT tokens, private key headers
+- Scans Bash command output, Read tool results, and Edit tool results
 
 ### What it exempts
 
 - Grep-family command output (searching for patterns, not leaking secrets)
 - Git diff/log/show output (reviewing code that contains pattern definitions)
-- Python/test script output (running the hook's own test suite)
+- Reading known project files (block-secrets.py, claude-approval-report.py, warn-secrets-output.py, README, CLAUDE.md) which contain token patterns as part of their regex definitions
 
 ## Recommended deny rules
 
-`settings/recommended-deny.json` contains a reference set of 26 deny patterns covering Read/Write/Edit access to sensitive file types. Use `--generate-settings` to see which ones are already in your config and what's missing.
+`settings/recommended-deny.json` contains a reference set of 60 deny patterns covering Read/Write/Edit access to sensitive file types. Use `--generate-settings` to see which ones are already in your config and what's missing.
 
 Deny rules protect the Read/Write/Edit tools. The hook protects Bash commands. Together they form a layered defense:
 
