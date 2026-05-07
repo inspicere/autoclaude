@@ -6,10 +6,10 @@ How to use the Vault CLI and MCP server without triggering the secret-blocking h
 
 ```bash
 # BLOCKED — literal hvs. token in command
-VAULT_TOKEN=hvs.CAESILzf... vault kv get secret/db
+VAULT_TOKEN=hvs.EXAMPLE_ONLY_NOT_REAL vault kv get secret/db
 
 # BLOCKED — export with literal value
-export VAULT_TOKEN="hvs.7wblICSnSPjPWeODAg4rIXCw"
+export VAULT_TOKEN="hvs.EXAMPLE_ONLY_NOT_REAL_TOKEN"
 ```
 
 ## Solution: file-based or agent token
