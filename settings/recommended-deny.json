@@ -10,7 +10,7 @@
       "Read(**/secrets/**)",
       "Read(**/credentials/**)",
       "Read(**/.aws/**)",
-      "Read(**/.ssh/id_*)",
+      "Read(**/.ssh/**)",
       "Read(**/.vault-token)",
       "Read(**/.vault_token)",
       "Read(**/.npmrc)",
@@ -22,17 +22,51 @@
       "Read(**/.pgpass)",
       "Read(**/.ansible-vault-password*)",
       "Write(**/.env*)",
+      "Write(**/.dev.vars*)",
+      "Write(**/*.pem)",
+      "Write(**/*.key)",
+      "Write(**/*.p12)",
+      "Write(**/*.pfx)",
       "Write(**/secrets/**)",
+      "Write(**/credentials/**)",
+      "Write(**/.aws/**)",
       "Write(**/.ssh/**)",
+      "Write(**/.vault-token)",
+      "Write(**/.vault_token)",
+      "Write(**/credentials.json)",
+      "Write(**/.kube/config)",
+      "Write(**/.docker/config.json)",
+      "Write(**/.netrc)",
+      "Write(**/.pgpass)",
+      "Write(**/.npmrc)",
+      "Write(**/.pypirc)",
+      "Write(**/.ansible-vault-password*)",
       "Edit(**/.env*)",
+      "Edit(**/.dev.vars*)",
+      "Edit(**/*.pem)",
+      "Edit(**/*.key)",
+      "Edit(**/*.p12)",
+      "Edit(**/*.pfx)",
       "Edit(**/secrets/**)",
-      "Edit(**/.ssh/id_*)"
+      "Edit(**/credentials/**)",
+      "Edit(**/.aws/**)",
+      "Edit(**/.ssh/**)",
+      "Edit(**/.vault-token)",
+      "Edit(**/.vault_token)",
+      "Edit(**/credentials.json)",
+      "Edit(**/.kube/config)",
+      "Edit(**/.docker/config.json)",
+      "Edit(**/.netrc)",
+      "Edit(**/.pgpass)",
+      "Edit(**/.npmrc)",
+      "Edit(**/.pypirc)",
+      "Edit(**/.ansible-vault-password*)"
     ]
   },
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Bash|Read|Edit",
+        "matcher": "Bash|Read|Edit|Write",
         "hooks": [
           {
             "type": "command",
@@ -43,7 +77,7 @@
     ],
     "PostToolUse": [
       {
-        "matcher": "Bash",
+        "matcher": "Bash|Read|Edit",
         "hooks": [
           {
             "type": "command",

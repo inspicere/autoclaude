@@ -23,7 +23,7 @@ _RE_SHELL_OPS = re.compile(r'^[&|;]+\s*')
 # --- Secret detection (patterns derived from gitleaks) ---
 
 _RE_SECRET_ASSIGN = re.compile(
-    r'([\w]*(?:API_KEY|SECRET|TOKEN|PASSWORD|PRIVATE_KEY|CREDENTIAL|_AUTH|AUTH_)[\w]*)'
+    r'\b(\w{0,50}(?:API_KEY|SECRET|TOKEN|PASSWORD|PRIVATE_KEY|CREDENTIAL|_AUTH|AUTH_)\w*)'
     r'=\s*(\S+)',
     re.IGNORECASE,
 )
@@ -239,13 +239,23 @@ def classify_risk(tool_name, tool_input):
 
         # Detect secret/key material exposure — scan the full original command
         # so env-var prefixes like VAULT_TOKEN=hvs.xxx aren't missed
-        if base not in ("grep", "egrep", "fgrep", "rg", "ag", "ack", "find"):
+        if base not in ("grep", "egrep", "fgrep", "rg", "ag", "ack", "find", "sed", "awk"):
             if _has_secret_token(raw_cmd):
                 return "destructive"
             if _RE_CURL_AUTH.search(raw_cmd):
                 return "destructive"
-            if _RE_SECRET_ASSIGN.search(raw_cmd):
-                return "destructive"
+            m = _RE_SECRET_ASSIGN.search(raw_cmd)
+            if m:
+                val = m.group(2).strip("\"'")
+                if (len(val) > 8
+                        and not val.startswith(('$', '{', 'http://', 'https://', '/'))
+                        and val.lower() not in (
+                            'changeme', 'password', 'placeholder', 'example',
+                            'your-token-here', 'your_token_here', 'replace-me',
+                            'xxxxxxxx', 'test1234', 'password123', 'true', 'false',
+                            'none', 'null',
+                        )):
+                    return "destructive"
             raw_parts = raw_cmd.split()
             if len(raw_parts) > 1 and _has_high_entropy_blob(raw_parts[1:]):
                 return "destructive"
@@ -255,6 +265,8 @@ def classify_risk(tool_name, tool_input):
             subcmd = parts[1]
             if subcmd in GIT_DESTRUCTIVE_FLAGS:
                 rest_args = parts[2:]
+                if subcmd == "clean" and any(a in ('-n', '--dry-run') for a in rest_args):
+                    return "read-only"
                 for arg in rest_args:
                     if arg in GIT_DESTRUCTIVE_FLAGS[subcmd]:
                         return "destructive"
@@ -284,17 +296,17 @@ def classify_risk(tool_name, tool_input):
 
         # ansible-playbook with --check/--syntax-check is read-only
         if base == "ansible-playbook":
-            rest = " ".join(parts[1:])
-            if "--check" in rest or "--syntax-check" in rest or "--list-tasks" in rest or "--list-hosts" in rest:
-                return "read-only"
+            for arg in parts[1:]:
+                if arg in ("--check", "-C", "--syntax-check", "--list-tasks", "--list-hosts"):
+                    return "read-only"
             return "mutating"
 
         # curl: check method
         if base == "curl":
             rest = " ".join(parts[1:])
-            if "-X DELETE" in rest or "--request DELETE" in rest:
+            if re.search(r'-X\s*DELETE|--request\s+DELETE', rest, re.IGNORECASE):
                 return "destructive"
-            if any(f in rest for f in ["-X POST", "-X PUT", "-X PATCH", "--data", "-d ", "-F "]):
+            if re.search(r'-X\s*(?:POST|PUT|PATCH)|--request\s+(?:POST|PUT|PATCH)|--data\b|-d\s|-F\s', rest, re.IGNORECASE):
                 return "mutating"
             return "read-only"
 
@@ -396,12 +408,10 @@ def command_matches_pattern(tool_name, tool_input, pattern):
         return True
 
     if tool_name == "Bash":
-        cmd = tool_input.get("command", "")
-        # Pattern uses : or space as separator, and * for glob
-        # "git add:*" or "git add *" both match "git add foo.txt"
+        cmd = tool_input.get("command", "").strip()
+        cmd = _RE_CD_PREFIX.sub('', cmd)
+        cmd = _RE_ENV_PREFIX.sub('', cmd)
         pat_normalized = pat_arg.replace(":", " ")
-        # Convert glob pattern to regex
-        # Handle ** as "match anything including /"
         regex = re.escape(pat_normalized).replace(r"\*\*", ".*").replace(r"\*", ".*")
         return bool(re.match(regex, cmd))
 
@@ -574,7 +584,8 @@ def process_session(jsonl_path, allow_patterns, project_name):
         # Determine rejection status
         is_rejected = False
         if isinstance(tool_result_content, str) and "rejected" in tool_result_content.lower():
-            is_rejected = True
+            if len(tool_result_content) < 200:
+                is_rejected = True
         else:
             msg_content = obj.get("message", {}).get("content", [])
             if isinstance(msg_content, list):
@@ -611,6 +622,8 @@ def process_session(jsonl_path, allow_patterns, project_name):
             tool_input = tool.get("input", {})
 
             auto = is_auto_allowed(tool_name, tool_input, allow_patterns)
+            if is_rejected:
+                auto = False
             risk = classify_risk(tool_name, tool_input)
 
             records.append({
@@ -670,7 +683,7 @@ def _find_secret_exposures(records):
         stripped = _RE_ENV_PREFIX.sub('', stripped)
         parts = stripped.split()
         if parts and os.path.basename(parts[0]) in (
-            "grep", "egrep", "fgrep", "rg", "ag", "ack", "find",
+            "grep", "egrep", "fgrep", "rg", "ag", "ack", "find", "sed", "awk",
         ):
             continue
 
@@ -1007,7 +1020,7 @@ def _load_settings(path):
     return {}
 
 
-def apply_suggestions(all_records, risk_level="read-only", dry_run=False, scope="project"):
+def apply_suggestions(all_records, risk_level="read-only", dry_run=False, scope="project", quiet=False):
     """Apply suggested allowlist patterns to settings files.
 
     scope: 'project' — per-project settings.local.json only (default)
@@ -1016,8 +1029,10 @@ def apply_suggestions(all_records, risk_level="read-only", dry_run=False, scope=
     """
     by_project, pattern_projects = _collect_applicable(all_records, risk_level)
 
+    _log = (lambda *a, **kw: None) if quiet else (lambda *a, **kw: print(*a, file=sys.stderr, **kw))
+
     if not by_project:
-        print("No applicable suggestions found.", file=sys.stderr)
+        _log("No applicable suggestions found.")
         return
 
     global_patterns = set()
@@ -1036,9 +1051,9 @@ def apply_suggestions(all_records, risk_level="read-only", dry_run=False, scope=
         new_global = sorted(global_patterns - existing_global)
         if new_global:
             project_count = {p: len(pattern_projects[p]) for p in new_global}
-            print(f"\n  GLOBAL: {global_path}", file=sys.stderr)
+            _log(f"\n  GLOBAL: {global_path}")
             for pattern in new_global:
-                print(f"    + {pattern}  ({project_count[pattern]} projects)", file=sys.stderr)
+                _log(f"    + {pattern}  ({project_count[pattern]} projects)")
 
             if not dry_run:
                 if "permissions" not in global_settings:
@@ -1070,9 +1085,9 @@ def apply_suggestions(all_records, risk_level="read-only", dry_run=False, scope=
             if not new_patterns:
                 continue
 
-            print(f"\n  {short_project_name(project)}: {settings_path}", file=sys.stderr)
+            _log(f"\n  {short_project_name(project)}: {settings_path}")
             for pattern, count, risk in new_patterns:
-                print(f"    + {pattern}  ({count} approvals, {risk})", file=sys.stderr)
+                _log(f"    + {pattern}  ({count} approvals, {risk})")
 
             if not dry_run:
                 if "permissions" not in settings:
@@ -1087,12 +1102,11 @@ def apply_suggestions(all_records, risk_level="read-only", dry_run=False, scope=
 
     if scope == "global":
         action = "Would add" if dry_run else "Added"
-        print(f"\n  {action} {total_added} global patterns.", file=sys.stderr)
+        _log(f"\n  {action} {total_added} global patterns.")
     else:
-        n_targets = len(by_project) + (1 if global_patterns else 0)
         action = "Would add" if dry_run else "Added"
         scope_label = "globally + per-project" if scope == "both" else "per-project"
-        print(f"\n  {action} {total_added} patterns ({scope_label}).", file=sys.stderr)
+        _log(f"\n  {action} {total_added} patterns ({scope_label}).")
 
 
 # --- Main ---
@@ -1124,18 +1138,21 @@ def parse_time_filter(value):
         sys.exit(1)
 
 
-def _normalize_ts(ts):
-    """Normalize timestamp for string comparison: convert Z suffix to +00:00."""
-    if ts.endswith("Z"):
-        return ts[:-1] + "+00:00"
-    return ts
+def _parse_ts(ts):
+    """Parse a timestamp string to a timezone-aware datetime, or None on failure."""
+    if not ts:
+        return None
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
 
 
 def filter_records(records, since=None, project=None):
     """Filter records by time and/or project."""
     if since:
-        cutoff_str = since.isoformat()
-        records = [r for r in records if _normalize_ts(r.get("timestamp", "")) >= cutoff_str]
+        records = [r for r in records
+                   if (dt := _parse_ts(r.get("timestamp", ""))) is not None and dt >= since]
     if project:
         full_name = HOME_SLUG + "-" + project
         records = [r for r in records if r["project"] == full_name]
@@ -1234,7 +1251,7 @@ BASELINE_DENY_RULES = [
     "Read(**/secrets/**)",
     "Read(**/credentials/**)",
     "Read(**/.aws/**)",
-    "Read(**/.ssh/id_*)",
+    "Read(**/.ssh/**)",
     "Read(**/.vault-token)",
     "Read(**/.vault_token)",
     "Read(**/.npmrc)",
@@ -1246,11 +1263,45 @@ BASELINE_DENY_RULES = [
     "Read(**/.pgpass)",
     "Read(**/.ansible-vault-password*)",
     "Write(**/.env*)",
+    "Write(**/.dev.vars*)",
+    "Write(**/*.pem)",
+    "Write(**/*.key)",
+    "Write(**/*.p12)",
+    "Write(**/*.pfx)",
     "Write(**/secrets/**)",
+    "Write(**/credentials/**)",
+    "Write(**/.aws/**)",
     "Write(**/.ssh/**)",
+    "Write(**/.vault-token)",
+    "Write(**/.vault_token)",
+    "Write(**/credentials.json)",
+    "Write(**/.kube/config)",
+    "Write(**/.docker/config.json)",
+    "Write(**/.netrc)",
+    "Write(**/.pgpass)",
+    "Write(**/.npmrc)",
+    "Write(**/.pypirc)",
+    "Write(**/.ansible-vault-password*)",
     "Edit(**/.env*)",
+    "Edit(**/.dev.vars*)",
+    "Edit(**/*.pem)",
+    "Edit(**/*.key)",
+    "Edit(**/*.p12)",
+    "Edit(**/*.pfx)",
     "Edit(**/secrets/**)",
-    "Edit(**/.ssh/id_*)",
+    "Edit(**/credentials/**)",
+    "Edit(**/.aws/**)",
+    "Edit(**/.ssh/**)",
+    "Edit(**/.vault-token)",
+    "Edit(**/.vault_token)",
+    "Edit(**/credentials.json)",
+    "Edit(**/.kube/config)",
+    "Edit(**/.docker/config.json)",
+    "Edit(**/.netrc)",
+    "Edit(**/.pgpass)",
+    "Edit(**/.npmrc)",
+    "Edit(**/.pypirc)",
+    "Edit(**/.ansible-vault-password*)",
 ]
 
 
@@ -1272,13 +1323,13 @@ def render_generate_settings(all_records, out=None):
         "hooks": {
             "PreToolUse": [
                 {
-                    "matcher": "Bash|Read|Edit",
+                    "matcher": "Bash|Read|Edit|Write",
                     "hooks": [{"type": "command", "command": pre_cmd}],
                 },
             ],
             "PostToolUse": [
                 {
-                    "matcher": "Bash",
+                    "matcher": "Bash|Read|Edit",
                     "hooks": [{"type": "command", "command": post_cmd}],
                 },
             ],
@@ -1584,7 +1635,7 @@ def main():
             if answer != "y":
                 print("Aborted.", file=sys.stderr)
                 return
-            apply_suggestions(all_records, risk_level=args.apply, dry_run=False, scope=args.scope)
+            apply_suggestions(all_records, risk_level=args.apply, dry_run=False, scope=args.scope, quiet=True)
         else:
             apply_suggestions(all_records, risk_level=args.apply, dry_run=True, scope=args.scope)
     else:
