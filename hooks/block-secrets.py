@@ -8,7 +8,7 @@ Catches two classes of leaks that deny rules alone cannot prevent:
 Install by adding to hooks in ~/.claude/settings.json:
   "hooks": {
     "PreToolUse": [{
-      "matcher": "Bash|Read|Edit",
+      "matcher": "Bash|Read|Edit|Write",
       "hooks": [{"type": "command", "command": "python3 /path/to/hooks/block-secrets.py"}]
     }]
   }
@@ -67,12 +67,13 @@ _RE_CURL_AUTH = re.compile(
 )
 
 _RE_SECRET_ASSIGN = re.compile(
-    r'([\w]*(?:API_KEY|SECRET|TOKEN|PASSWORD|PRIVATE_KEY|CREDENTIAL|_AUTH|AUTH_)[\w]*)'
+    r'\b(\w{0,50}(?:API_KEY|SECRET|TOKEN|PASSWORD|PRIVATE_KEY|CREDENTIAL|_AUTH|AUTH_)\w*)'
     r'=\s*(\S+)',
     re.IGNORECASE,
 )
 
-# Commands that are searching FOR patterns, not using secrets
+_RE_HIGH_ENTROPY = re.compile(r'^[A-Za-z0-9+/=]+$')
+
 _GREP_FAMILY = frozenset({
     'grep', 'egrep', 'fgrep', 'rg', 'ag', 'ack', 'find', 'sed', 'awk',
 })
@@ -97,6 +98,12 @@ _SENSITIVE_PATH_RE = re.compile(
     r'|(?:^|/)\.netrc$'
     r'|(?:^|/)\.pgpass$'
     r'|(?:^|/)\.ansible[-_]vault[-_]password'
+    r'|(?:^|/)\.git-credentials$'
+    r'|(?:^|/)\.gnupg/(?:secring|private-keys)'
+    r'|(?:^|/)\.bash_history$'
+    r'|(?:^|/)\.zsh_history$'
+    r'|(?:^|/)\.my\.cnf$'
+    r'|(?:^|/)\.?terraform\.tfstate(?:\.backup)?$'
     r')',
 )
 
@@ -106,8 +113,46 @@ _FILE_READERS = frozenset({
 })
 
 _FILE_COPIERS = frozenset({
-    'cp', 'mv', 'ln', 'install', 'rsync',
+    'cp', 'mv', 'ln', 'install', 'rsync', 'scp',
 })
+
+_COMMAND_WRAPPERS = frozenset({
+    'sudo', 'env', 'time', 'nice', 'timeout', 'nohup',
+})
+
+_INTERPRETERS = frozenset({
+    'python3', 'python', 'perl', 'ruby', 'node', 'php', 'lua',
+})
+
+_RE_COMMAND_SUBST = re.compile(r'\$\((.+?)\)', re.DOTALL)
+
+_SENSITIVE_DIRS_RE = re.compile(
+    r'(?:^|/)\.(?:ssh|gnupg|aws|kube|docker)/?$'
+)
+
+_RE_STDIN_REDIRECT = re.compile(r'(?<!<)<(?!<)\s*([^\s<>&|;]+)')
+
+_RE_SHELL_EXEC = re.compile(
+    r'\b(?:bash|sh|zsh)\s+-c\s+["\'](.+?)["\']'
+    r'|'
+    r'\b(?:bash|sh|zsh)\s+-c\s+(\S+)',
+    re.DOTALL,
+)
+
+_RE_EVAL = re.compile(
+    r'\beval\s+["\'](.+?)["\']'
+    r'|'
+    r'\beval\s+(.+)',
+    re.DOTALL,
+)
+
+_RE_INTERP_FILE_READ = re.compile(
+    r'''(?:open|Path)\s*\(\s*['"]([^'"]+)['"]'''
+    r'''|File\.(?:read|open)\s*\(\s*['"]([^'"]+)['"]'''
+    r'''|open\s*\(\s*\w+\s*,\s*['"](?:<\s*)?['"]?\s*,\s*['"]([^'"]+)['"]'''
+    r'''|open\s+\w+\s*,\s*['"]?([^'";\s]+)['"]?'''
+    r'''|file_get_contents\s*\(\s*['"]([^'"]+)['"]'''
+)
 
 
 def _shannon_entropy(data):
@@ -133,7 +178,7 @@ def _is_sensitive_path(path):
 
 
 def _check_command_secrets(command):
-    """Check for embedded secrets in a Bash command. Returns reason string or None."""
+    """Check for embedded secrets in a command string. Returns reason or None."""
     if _PREFIXED_TOKEN_PATTERNS.search(command):
         return "Command contains a known API token/key pattern"
 
@@ -171,39 +216,112 @@ def _check_command_secrets(command):
             clean = token.strip("\"'")
             if clean.startswith(('/', '.', '~', '-', '$', '{', '(')):
                 continue
-            if len(clean) >= 32 and re.match(r'^[A-Za-z0-9+/=]+$', clean):
+            if len(clean) >= 32 and _RE_HIGH_ENTROPY.match(clean):
                 if _shannon_entropy(clean) >= 3.5:
                     return "Command contains a high-entropy string (possible secret)"
 
     return None
 
 
-_RE_STDIN_REDIRECT = re.compile(
-    r'<\s*([^\s<>&|;]+)'
-)
+def _split_shell_commands(command):
+    """Split a shell command on ;, &&, ||, | respecting quotes."""
+    commands = []
+    current = []
+    i = 0
+    in_sq = False
+    in_dq = False
 
-_RE_SHELL_EXEC = re.compile(
-    r'\b(?:bash|sh|zsh)\s+-c\s+["\'](.+?)["\']'
-    r'|'
-    r'\b(?:bash|sh|zsh)\s+-c\s+(\S+)',
-    re.DOTALL,
-)
+    while i < len(command):
+        c = command[i]
 
-_RE_EVAL = re.compile(
-    r'\beval\s+["\'](.+?)["\']'
-    r'|'
-    r'\beval\s+(.+)',
-    re.DOTALL,
-)
+        if c == '\\' and in_dq and i + 1 < len(command):
+            current.append(c)
+            current.append(command[i + 1])
+            i += 2
+            continue
 
-_RE_INTERP_FILE_READ = re.compile(
-    r'''(?:open|Path)\s*\(\s*['"]([^'"]+)['"]'''
-    r'''|File\.(?:read|open)\s*\(\s*['"]([^'"]+)['"]'''
-    r'''|open\s*\(\s*\w+\s*,\s*['"](?:<\s*)?['"]?\s*,\s*['"]([^'"]+)['"]'''
-    r'''|open\s+\w+\s*,\s*['"]?([^'";\s]+)['"]?'''
-)
+        if c == "'" and not in_dq:
+            in_sq = not in_sq
+            current.append(c)
+        elif c == '"' and not in_sq:
+            in_dq = not in_dq
+            current.append(c)
+        elif not in_sq and not in_dq:
+            if c == ';':
+                cmd = ''.join(current).strip()
+                if cmd:
+                    commands.append(cmd)
+                current = []
+            elif c == '&' and i + 1 < len(command) and command[i + 1] == '&':
+                cmd = ''.join(current).strip()
+                if cmd:
+                    commands.append(cmd)
+                current = []
+                i += 1
+            elif c == '|' and i + 1 < len(command) and command[i + 1] == '|':
+                cmd = ''.join(current).strip()
+                if cmd:
+                    commands.append(cmd)
+                current = []
+                i += 1
+            elif c == '|':
+                cmd = ''.join(current).strip()
+                if cmd:
+                    commands.append(cmd)
+                current = []
+            else:
+                current.append(c)
+        else:
+            current.append(c)
+        i += 1
 
-_INTERPRETERS = frozenset({'python3', 'python', 'perl', 'ruby', 'node'})
+    cmd = ''.join(current).strip()
+    if cmd:
+        commands.append(cmd)
+
+    return commands
+
+
+def _strip_prefixes(cmd):
+    """Strip cd and env-var prefixes from a command."""
+    cmd = re.sub(r'^(cd\s+(?:\S+|"[^"]*"|\'[^\']*\')\s*&&\s*)+', '', cmd.strip())
+    cmd = re.sub(r'^(\w+=(?:\S+|"[^"]*"|\'[^\']*\')\s+)+', '', cmd)
+    return cmd
+
+
+def _strip_wrappers(parts):
+    """Strip command wrappers (sudo, env, time, etc.) and return remaining parts."""
+    idx = 0
+    while idx < len(parts):
+        base = os.path.basename(parts[idx])
+        if base == 'sudo':
+            idx += 1
+            while idx < len(parts):
+                if parts[idx].startswith('-'):
+                    flag = parts[idx]
+                    idx += 1
+                    if flag in ('-u', '-g', '-C', '-D', '-h', '-p', '-r', '-t', '-U'):
+                        if idx < len(parts):
+                            idx += 1
+                elif '=' in parts[idx]:
+                    idx += 1
+                else:
+                    break
+        elif base in ('time', 'nice', 'nohup'):
+            idx += 1
+        elif base == 'timeout':
+            idx += 1
+            while idx < len(parts) and parts[idx].startswith('-'):
+                idx += 1
+            if idx < len(parts):
+                idx += 1
+        elif base == 'env':
+            idx += 1
+            while idx < len(parts) and (parts[idx].startswith('-') or '=' in parts[idx]):
+                idx += 1
+        else:
+            break
+    return parts[idx:]
 
 
 def _check_sensitive_paths_in_text(text):
@@ -214,17 +332,19 @@ def _check_sensitive_paths_in_text(text):
     return None
 
 
-def _check_bash_file_access(command):
-    """Check if a Bash command reads sensitive files. Returns reason string or None."""
-    cmd = re.sub(r'^(cd\s+(?:\S+|"[^"]*"|\'[^\']*\')\s*&&\s*)+', '', command.strip())
-    cmd = re.sub(r'^(\w+=(?:\S+|"[^"]*"|\'[^\']*\')\s+)+', '', cmd)
+def _check_single_command_access(command):
+    """Check if a single shell command (no pipes/chains) accesses sensitive files."""
+    cmd = _strip_prefixes(command)
     parts = cmd.split()
+    if not parts:
+        return None
+
+    parts = _strip_wrappers(parts)
     if not parts:
         return None
 
     base = os.path.basename(parts[0])
 
-    # Direct file readers: cat, head, tail, etc.
     if base in _FILE_READERS:
         for arg in parts[1:]:
             if arg.startswith('-'):
@@ -232,15 +352,26 @@ def _check_bash_file_access(command):
             if _is_sensitive_path(arg):
                 return f"Command reads sensitive file: {arg}"
 
-    # File copiers: cp, mv, ln, install, rsync — block if source is sensitive
     if base in _FILE_COPIERS:
-        args = [a for a in parts[1:] if not a.startswith('-')]
-        sources = args[:-1] if len(args) >= 2 else args
-        for src in sources:
-            if _is_sensitive_path(src):
-                return f"Command copies/moves sensitive file: {src}"
+        if base == 'scp':
+            args = [a for a in parts[1:] if not a.startswith('-')]
+            for arg in args[:-1]:
+                if ':' not in arg and _is_sensitive_path(arg):
+                    return f"Command copies sensitive file via scp: {arg}"
+        else:
+            args = [a for a in parts[1:] if not a.startswith('-')]
+            sources = args[:-1] if len(args) >= 2 else args
+            for src in sources:
+                if _is_sensitive_path(src):
+                    return f"Command copies/moves sensitive file: {src}"
 
-    # dd if=<path>
+    if base in _GREP_FAMILY:
+        for arg in parts[1:]:
+            if arg.startswith('-'):
+                continue
+            if _is_sensitive_path(arg):
+                return f"Command accesses sensitive file: {arg}"
+
     if base == 'dd':
         for arg in parts[1:]:
             if arg.startswith('if='):
@@ -248,31 +379,52 @@ def _check_bash_file_access(command):
                 if _is_sensitive_path(path):
                     return f"Command reads sensitive file via dd: {path}"
 
-    # eval '<inner command>' — unwrap and re-check
+    if base in ('curl', 'wget'):
+        for arg in parts[1:]:
+            if arg.lower().startswith('file://'):
+                path = arg[7:]
+                if _is_sensitive_path(path):
+                    return f"Command reads sensitive file via {base}: {arg}"
+
+    if base in ('tar', 'zip'):
+        for arg in parts[1:]:
+            if arg.startswith('-'):
+                continue
+            if _is_sensitive_path(arg):
+                return f"Command archives sensitive file: {arg}"
+
+    if base == 'docker' and len(parts) > 1 and parts[1] == 'run':
+        for i, arg in enumerate(parts):
+            if arg in ('-v', '--volume') and i + 1 < len(parts):
+                mount = parts[i + 1]
+                host_path = mount.split(':')[0]
+                expanded = os.path.expanduser(host_path)
+                if _is_sensitive_path(host_path) or _SENSITIVE_DIRS_RE.search(expanded):
+                    return f"Command mounts sensitive path into container: {host_path}"
+
     if base == 'eval':
         m = _RE_EVAL.search(cmd)
         if m:
             inner = m.group(1) or m.group(2)
             if inner:
-                result = _check_bash_file_access(inner)
+                result = _check_single_command_access(inner)
                 if result:
                     return f"eval wraps blocked command: {result}"
 
-    # bash -c / sh -c / zsh -c — unwrap and re-check
     for m in _RE_SHELL_EXEC.finditer(cmd):
         inner = m.group(1) or m.group(2)
         if inner:
-            result = _check_bash_file_access(inner)
+            result = _check_single_command_access(inner)
             if result:
                 return f"Subshell wraps blocked command: {result}"
 
-    # Interpreter file reads: python3 -c, perl -e, ruby -e
     if base in _INTERPRETERS:
         for i, arg in enumerate(parts[1:], 1):
-            if arg in ('-c', '-e') and i + 1 <= len(parts) - 1:
+            if arg in ('-c', '-e', '-r') and i + 1 <= len(parts) - 1:
                 script = ' '.join(parts[i + 1:])
                 for fm in _RE_INTERP_FILE_READ.finditer(script):
-                    path = fm.group(1) or fm.group(2) or fm.group(3) or fm.group(4)
+                    path = (fm.group(1) or fm.group(2) or fm.group(3)
+                            or fm.group(4) or fm.group(5))
                     if path and _is_sensitive_path(path):
                         return f"Interpreter reads sensitive file: {path}"
                 sensitive = _check_sensitive_paths_in_text(script)
@@ -280,9 +432,10 @@ def _check_bash_file_access(command):
                     return f"Interpreter script references sensitive file: {sensitive}"
                 break
 
-    # Shell stdin redirection: < /path/to/sensitive
     for m in _RE_STDIN_REDIRECT.finditer(command):
         path = m.group(1).strip("\"'")
+        if path.startswith('('):
+            continue
         if _is_sensitive_path(path):
             return f"Stdin redirection from sensitive file: {path}"
 
@@ -290,7 +443,7 @@ def _check_bash_file_access(command):
 
 
 def _check_file_path(path):
-    """Check if a Read/Edit file_path targets a sensitive file."""
+    """Check if a Read/Edit/Write file_path targets a sensitive file."""
     if _is_sensitive_path(path):
         return f"Sensitive file access blocked: {path}"
     return None
@@ -317,21 +470,26 @@ def main():
         if not command:
             sys.exit(0)
 
-        stripped = re.sub(r'^(cd\s+(?:\S+|"[^"]*"|\'[^\']*\')\s*&&\s*)+', '', command.strip())
-        stripped = re.sub(r'^(\w+=(?:\S+|"[^"]*"|\'[^\']*\')\s+)+', '', stripped)
-        base_parts = stripped.split()
-        if base_parts:
-            base = os.path.basename(base_parts[0])
-            if base not in _GREP_FAMILY:
-                reason = _check_command_secrets(command)
-                if reason:
-                    block(f"BLOCKED: {reason}")
+        sub_cmds = _split_shell_commands(command)
+        for m in _RE_COMMAND_SUBST.finditer(command):
+            sub_cmds.extend(_split_shell_commands(m.group(1)))
 
-        reason = _check_bash_file_access(command)
-        if reason:
-            block(f"BLOCKED: {reason}")
+        for sub_cmd in sub_cmds:
+            stripped = _strip_prefixes(sub_cmd)
+            base_parts = _strip_wrappers(stripped.split())
 
-    elif tool_name in ("Read", "Edit"):
+            if base_parts:
+                base = os.path.basename(base_parts[0])
+                if base not in _GREP_FAMILY:
+                    reason = _check_command_secrets(sub_cmd)
+                    if reason:
+                        block(f"BLOCKED: {reason}")
+
+            reason = _check_single_command_access(sub_cmd)
+            if reason:
+                block(f"BLOCKED: {reason}")
+
+    elif tool_name in ("Read", "Edit", "Write"):
         file_path = tool_input.get("file_path", "")
         if file_path:
             reason = _check_file_path(file_path)
