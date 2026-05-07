@@ -40,7 +40,7 @@ Key design choices:
 
 ## PreToolUse hook (`hooks/block-secrets.py`)
 
-A self-contained Python hook (no imports from the main script) that blocks tool calls containing secrets before execution. Uses the same 22 token regex patterns as the report script, duplicated intentionally so the hook works standalone when installed at `~/.claude/hooks/`. Blocks via exit code 2 (stderr shown to user). The `_GREP_FAMILY` exclusion set mirrors the main script's approach — search commands are exempt from secret scanning.
+A self-contained Python hook (no imports from the main script) that blocks tool calls containing secrets before execution. Uses the same 22 token regex patterns as the report script, duplicated intentionally so the hook works standalone when installed at `~/.claude/hooks/`. Blocks via exit code 2 (stderr shown to user). The `_GREP_FAMILY` exclusion set is a superset of the main script's approach — the hook additionally includes `sed` and `awk` to reduce false positives on stream-editing commands, while the main script's grep-family set does not include them.
 
 The hook covers gaps that deny rules cannot:
 1. Secrets embedded in Bash commands (`VAULT_TOKEN=hvs.xxx vault kv get`)
@@ -49,7 +49,7 @@ The hook covers gaps that deny rules cannot:
 
 ## PostToolUse hook (`hooks/warn-secrets-output.py`)
 
-A self-contained PostToolUse hook that scans Bash command output for leaked secrets (known token patterns, JWTs, private key headers). Cannot prevent the leak but emits `decision: "block"` with a warning to avoid using the values and advise credential rotation. Exempts grep-family, git diff/log/show, and test script output to avoid false positives.
+A self-contained PostToolUse hook that scans Bash command output for leaked secrets (known token patterns, JWTs, private key headers). Cannot prevent the leak but emits `decision: "block"` with a warning to avoid using the values and advise credential rotation. Exempts grep-family commands, git diff/log/show output, Python/test script output (running the hook's own test suite), and files ending in `.py`, `.md`, or `.json` to avoid false positives on code/config containing pattern definitions.
 
 ## Vault token renewal (`scripts/vault-token-renew.sh`)
 
@@ -66,3 +66,36 @@ Weekly cron job that runs `vault token renew` to extend the terrabot CLI token. 
 - **`architecture.md`** — reference architecture showing how deny rules, the hook, and MCP servers form a layered defense, with homelab deployment diagrams and adaptation instructions.
 
 Reference these docs when adding new secret patterns or modifying detection logic to ensure the documented workarounds remain valid.
+
+## Known Issues (from 2026-05-07 adversarial audit)
+
+A comprehensive adversarial audit on 2026-05-07 identified 32 bypass vectors and 22 code quality issues. No code changes were made — this was a read-only assessment. Key findings by severity:
+
+### Critical (4)
+1. `_RE_SECRET_ASSIGN` regex catastrophic backtracking in `block-secrets.py` — 50k-char input causes timeout, hook fails open
+2. Multi-statement command bypass (`echo hello; cat ~/.vault-token`) — only first command in chain parsed
+3. Pipe-based bypass (`echo x | cat ~/.env`) — same root cause as #2
+4. grep-family reads entire files undetected (`grep . ~/.env`, `awk '{print}' ~/.ssh/id_rsa`)
+
+### High (9)
+5. Write tool completely unprotected by hook (not in matcher, no code path handling)
+6. PostToolUse exempts `.py`/`.md`/`.json` files from output scanning (too broad)
+7. PostToolUse ignores Read/Edit tool output entirely
+8. `curl file://`, `wget file://` bypass file access checks
+9. `tar`/`zip`/`scp` exfiltration not detected
+10. `sudo cat` bypass (sudo not stripped as prefix)
+11. Subshell/command substitution bypass (`$(which cat) ~/.env`, `TOKEN=$(cat ~/.vault-token)`)
+12. `docker run -v` mount bypass
+13. `command_matches_pattern` doesn't strip `cd` prefixes in main script (inaccurate reporting)
+
+### Medium (10)
+14-23. Missing sensitive paths, missing token patterns, heredoc false positive, `classify_risk` lacks placeholder filtering, Read tool double-counting, timezone comparison bug, grep-family set inconsistency between hook and main script, `generate_settings` merge risk, curl compact flag forms missed, Write/Edit deny rule asymmetry
+
+### Documentation Discrepancies (7)
+- `_GREP_FAMILY` "mirrors" claim corrected (hook has `sed`/`awk`, main script does not)
+- PostToolUse exemption list was incomplete in CLAUDE.md (now fixed above)
+- Architecture diagram deny/allow counts outdated (now fixed in `docs/architecture.md`)
+- Architecture files table missing `warn-secrets-output.py` and `scripts/` (now fixed)
+- "20+ others" token count should be "17 others" in README grep-family description
+- `.env.example` allowed mechanism different than documented
+- README missing `sed`/`awk` from grep-family description

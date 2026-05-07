@@ -87,9 +87,10 @@ This document shows how the protection layers in this project fit together, usin
 │  VM 200 — Claude Code host      │
 │                                 │
 │  ~/.claude/settings.json        │
-│    ├─ permissions.deny (15)     │
+│    ├─ permissions.deny (30)     │
 │    ├─ permissions.allow (29)    │
 │    └─ hooks[] → block-secrets   │
+│    └─ hooks[] → warn-secrets    │
 │                                 │
 │  ~/.mcp.json                    │
 │    ├─ vault   → mcp-01:3100    │
@@ -184,6 +185,8 @@ To deploy this in a different environment:
 | File | Role in the architecture |
 |------|-------------------------|
 | `hooks/block-secrets.py` | Layer 2 — the PreToolUse hook |
+| `hooks/warn-secrets-output.py` | Layer 2b — the PostToolUse output scanner |
 | `settings/recommended-deny.json` | Layer 1 — reference deny rules |
 | `claude-approval-report.py` | Analysis — reports what got through, suggests improvements |
+| `scripts/vault-token-renew.sh` | Maintenance — weekly Vault token renewal cron job |
 | `docs/auth-best-practices.md` | Index of safe patterns for working within the layers |
