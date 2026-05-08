@@ -236,6 +236,7 @@ def _could_glob_match_sensitive(token):
 def _is_sensitive_path(path):
     path = _strip_quotes(path)
     path = os.path.expanduser(path)
+    path = os.path.realpath(path)
     if not path.startswith('/'):
         path = '/' + path
     basename = os.path.basename(path)
