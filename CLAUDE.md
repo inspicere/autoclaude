@@ -19,7 +19,7 @@ python3 claude-approval-report.py --session current --summary  # latest session 
 python3 claude-approval-report.py -o           # write to auto-named timestamped file
 ```
 
-No dependencies beyond Python 3.8+ stdlib. The main script has no test suite — verify changes by running against live session data in `~/.claude/projects/`. The hooks have comprehensive test suites: `test_block_secrets.py` (48 tests), `test_bypass_fixes.py` (67 tests), `test_round2_bypass_fixes.py` (50 tests), `test_warn_secrets.py` (12 tests) — 177 total.
+No dependencies beyond Python 3.8+ stdlib. The main script has no test suite — verify changes by running against live session data in `~/.claude/projects/`. The hooks have comprehensive test suites: `test_block_secrets.py` (48 tests), `test_bypass_fixes.py` (67 tests), `test_round2_bypass_fixes.py` (50 tests), `test_fp_fixes.py` (28 tests), `test_warn_secrets.py` (12 tests) — 205 total.
 
 ## Architecture
 
@@ -122,6 +122,13 @@ A two-round multi-agent red team engagement on 2026-05-08 targeted the hooks wit
 - **Bash array expansion**: `a=(cat .env); "${a[@]}"` — array content not trackable
 - **Runtime path construction**: `os.listdir()` in scripts — no .env reference in args
 - **Generic write-then-execute**: script content has no sensitive path reference
+
+### Usability testing (2026-05-08) — 2 false positives found and fixed
+
+150+ common workflow commands tested across git/dev, infrastructure, edge cases, and Write/Edit content. Two false positive categories discovered and fixed:
+
+1. ~~**`find -name` false positive**~~ — `find -name '.git*'` incorrectly blocked because the grep-family handler passed `-name` value tokens to `_is_sensitive_path`, and `_could_glob_match_sensitive` treated bare `*` basename as matching everything. Fixed: grep-family handler now skips `-name`/`-iname`/`-path`/`-ipath`/`-regex`/`-wholename` value tokens; `_could_glob_match_sensitive` returns False for bare `*`/`?`/`**` basenames.
+2. ~~**Write/Edit content scanner false positives on docs**~~ — markdown/YAML/text files with prose like "cat server.pem to check certificate details" triggered the content scanner. Fixed: content scanning now gated on file extension — only scans executable script files (`.sh`, `.bash`, `.py`, `.rb`, `.pl`, `.js`, etc.) and extensionless files, skips `.md`, `.txt`, `.yml`, `.json`, `.html`, `.rst`, etc.
 
 ## Known Issues (from 2026-05-07 adversarial audit) — ALL RESOLVED
 

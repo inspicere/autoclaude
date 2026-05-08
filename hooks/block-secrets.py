@@ -210,6 +210,8 @@ def _could_glob_match_sensitive(token):
         return False
     import fnmatch
     pattern_basename = os.path.basename(token)
+    if pattern_basename in ('*', '?', '**'):
+        return False
     for sensitive_name in ('.env', '.env.local', '.env.production', '.env.development',
                            '.pem', '.key', '.npmrc', '.pypirc', '.netrc', '.pgpass',
                            '.my.cnf', '.git-credentials', '.bash_history', '.zsh_history',
@@ -558,7 +560,18 @@ def _check_single_command_access(command):
                     return f"Command copies/moves sensitive file: {src}"
 
     if base in _GREP_FAMILY:
+        _FIND_VALUE_FLAGS = frozenset({
+            '-name', '-iname', '-path', '-ipath', '-regex', '-iregex',
+            '-wholename', '-iwholename', '-lname', '-ilname',
+        })
+        skip_next = False
         for arg in parts[1:]:
+            if skip_next:
+                skip_next = False
+                continue
+            if arg in _FIND_VALUE_FLAGS:
+                skip_next = True
+                continue
             if arg.startswith('-'):
                 continue
             if _is_sensitive_path(arg):
@@ -858,7 +871,18 @@ def main():
                 block(f"BLOCKED: {reason}")
 
         content = tool_input.get("content", "") or tool_input.get("new_string", "")
-        if content:
+        _SCANNABLE_EXTENSIONS = frozenset({
+            '.sh', '.bash', '.zsh', '.ksh', '.csh', '.fish',
+            '.py', '.rb', '.pl', '.php', '.lua',
+            '.js', '.ts', '.mjs', '.cjs',
+            '.ps1', '.psm1', '.bat', '.cmd',
+            '.env', '.envrc', '.profile', '.bashrc', '.zshrc',
+        })
+        should_scan_content = False
+        if file_path:
+            _, ext = os.path.splitext(os.path.basename(file_path))
+            should_scan_content = ext.lower() in _SCANNABLE_EXTENSIONS or not ext
+        if content and should_scan_content:
             _SCRIPT_COMMANDS = _FILE_READERS | _FILE_COPIERS | _INTERPRETERS | {'bash', 'sh', 'zsh', 'exec', 'eval'}
             for line in content.splitlines():
                 line_stripped = line.strip()
