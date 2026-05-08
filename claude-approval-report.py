@@ -637,17 +637,26 @@ def process_session(jsonl_path, allow_patterns, project_name):
                 auto = False
             risk = classify_risk(tool_name, tool_input)
 
+            has_secrets = (tool_name == "Bash"
+                          and _cmd_has_secrets(tool_input.get("command", "")))
+
+            redacted_input = tool_input
+            if tool_name == "Bash" and "command" in tool_input:
+                redacted_input = dict(tool_input)
+                redacted_input["command"] = redact_secrets(tool_input["command"])
+
             records.append({
                 "project": project_name,
                 "session": os.path.basename(jsonl_path),
                 "tool_name": tool_name,
-                "tool_input": tool_input,
+                "tool_input": redacted_input,
                 "display": get_tool_display(tool_name, tool_input),
                 "full_command": get_tool_full_command(tool_name, tool_input),
                 "rejected": is_rejected,
                 "auto_allowed": auto,
                 "risk": risk,
                 "timestamp": obj.get("timestamp", ""),
+                "_has_secrets": has_secrets,
             })
 
     return records
@@ -681,6 +690,7 @@ def _find_secret_exposures(records):
 
     Returns list of (record, category) tuples where category is one of:
     token, jwt, private_key, auth_header, secret_assign, high_entropy.
+    Uses pre-computed _has_secrets flag and redacted command for categorization.
     """
     results = []
     for r in records:
@@ -688,16 +698,10 @@ def _find_secret_exposures(records):
             continue
         if r["tool_name"] != "Bash":
             continue
-        cmd = r["tool_input"].get("command", "")
-
-        stripped = _RE_CD_PREFIX.sub('', cmd.strip())
-        stripped = _RE_ENV_PREFIX.sub('', stripped)
-        parts = stripped.split()
-        if parts and os.path.basename(parts[0]) in (
-            "grep", "egrep", "fgrep", "rg", "ag", "ack", "find", "sed", "awk",
-        ):
+        if not r.get("_has_secrets"):
             continue
 
+        cmd = r["tool_input"].get("command", "")
         if _PREFIXED_TOKEN_PATTERNS.search(cmd):
             results.append((r, "token"))
         elif _RE_JWT.search(cmd):
@@ -708,7 +712,7 @@ def _find_secret_exposures(records):
             results.append((r, "auth_header"))
         elif _RE_SECRET_ASSIGN.search(cmd):
             results.append((r, "secret_assign"))
-        elif len(cmd.split()) > 1 and _has_high_entropy_blob(cmd.split()[1:]):
+        else:
             results.append((r, "high_entropy"))
 
     return results
