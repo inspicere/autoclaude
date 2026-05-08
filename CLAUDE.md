@@ -26,7 +26,7 @@ python3 claude-approval-report.py --session current --summary  # latest session 
 python3 claude-approval-report.py -o           # write to auto-named timestamped file
 ```
 
-No dependencies beyond Python 3.8+ stdlib. The main script has no test suite — verify changes by running against live session data in `~/.claude/projects/`. The hooks have comprehensive test suites: `test_block_secrets.py` (59 tests), `test_bypass_fixes.py` (110 tests), `test_round2_bypass_fixes.py` (50 tests), `test_fp_fixes.py` (28 tests), `test_infra_usability.py` (136 tests), `test_warn_secrets.py` (12 tests) — 395 total.
+No dependencies beyond Python 3.8+ stdlib. Test suites: `test_report.py` (155 tests for the main script's pure functions), `test_block_secrets.py` (62 tests), `test_bypass_fixes.py` (110 tests), `test_round2_bypass_fixes.py` (50 tests), `test_fp_fixes.py` (28 tests), `test_infra_usability.py` (136 tests), `test_warn_secrets.py` (12 tests) — 553 total.
 
 ## Architecture
 
@@ -53,6 +53,8 @@ The hook covers gaps that deny rules cannot:
 1. Secrets embedded in Bash commands (`VAULT_TOKEN=hvs.xxx vault kv get`)
 2. Sensitive file reads via Bash (`cat .env`) that bypass Read tool deny rules
 3. Bypass vectors: subshell wrapping (`bash -c`), `eval`, interpreter file I/O (`python3 -c "open('.env')"`), file copy/move/link (`cp .env /tmp/x`), `dd if=`, stdin redirection (`< .env`), process substitution (`<()`), heredoc-to-interpreter, backtick substitution, pipe-to-shell (`echo cmd | bash`), subshell/brace grouping (`(cmd)`, `{ cmd; }`), variable assignment tracking, SSH remote commands, `xargs -a`/`--arg-file`, long-form file flags (`--from-file=`, `--files0-from=`), 45+ file-reading tools
+
+Operational features: `HOOK_DEBUG=1` emits debug trace to stderr (tool routing, pattern matches, entropy scores, sensitive path checks). `HOOK_AUDIT=1` writes structured JSONL records to `~/.claude/hook-audit.jsonl` (timestamp, decision, tool, summary, reason). Both are zero-cost when disabled. Fail-closed design: unknown tool types are blocked, malformed input is blocked.
 
 ## PostToolUse hook (`hooks/warn-secrets-output.py`)
 
