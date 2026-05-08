@@ -778,8 +778,30 @@ def _check_file_path(path):
     return None
 
 
+_REMEDIATION_HINTS = (
+    ("known API token/key pattern", "Rotate this credential. Use an MCP server or environment variable instead."),
+    ("JWT token", "Rotate this credential. Use an MCP server or environment variable instead."),
+    ("private key material", "Never embed key material in commands. Use file references or MCP."),
+    ("Authorization header with credentials", "Use an MCP server for authenticated API calls."),
+    ("assigns a value to secret variable", "Use environment variables or MCP instead of inline secrets."),
+    ("high-entropy string", "If not a secret, use a file or environment variable to pass the value."),
+    ("sensitive file", "Use deny rules in settings.json to protect this path, or access via MCP."),
+    ("while-read loop reads sensitive file", "Avoid referencing sensitive files in shell constructs."),
+    ("Written content contains", "Don't embed secrets in scripts. Use environment variables or MCP."),
+    ("Heredoc to interpreter", "Avoid referencing sensitive files in shell constructs."),
+    ("variable $", "Don't store sensitive paths in shell variables. Use MCP or deny rules."),
+    ("fail-closed", "Check hook configuration. This tool type may need to be added to _PASSTHROUGH_TOOLS."),
+)
+
+
 def block(reason):
-    print(reason, file=sys.stderr)
+    hint = ""
+    reason_lower = reason.lower()
+    for pattern, h in _REMEDIATION_HINTS:
+        if pattern.lower() in reason_lower:
+            hint = f"\n  Hint: {h}"
+            break
+    print(f"{reason}{hint}", file=sys.stderr)
     sys.exit(2)
 
 
