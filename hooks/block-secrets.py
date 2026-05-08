@@ -318,10 +318,15 @@ def _check_command_secrets(command):
             if clean.startswith(('/', '.', '~', '-', '$', '{', '(')):
                 continue
             if len(clean) >= 32 and _RE_HIGH_ENTROPY.match(clean):
-                entropy = _shannon_entropy(clean)
-                _debug(f"entropy check: len={len(clean)} score={entropy:.2f}")
-                if entropy >= 3.5:
+                ent = _shannon_entropy(clean)
+                _debug(f"entropy check: len={len(clean)} score={ent:.2f}")
+                if ent >= 3.5:
                     return "Command contains a high-entropy string (possible secret)"
+                if ent >= 3.0:
+                    unique_ratio = len(set(clean)) / len(clean)
+                    max_freq = max(clean.count(c) for c in set(clean)) / len(clean)
+                    if unique_ratio >= 0.4 and max_freq <= 0.15:
+                        return "Command contains a high-entropy string (possible padded secret)"
 
     return None
 
