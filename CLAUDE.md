@@ -17,6 +17,9 @@ python3 claude-approval-report.py --apply --auto     # auto-apply read-only patt
 python3 claude-approval-report.py --apply mutating --min-approvals 10  # mutating, 10+ approvals
 python3 claude-approval-report.py --json --since 7d --project laima  # filtered JSON
 python3 claude-approval-report.py --generate-settings  # deny rules + hook config
+python3 claude-approval-report.py --trend              # daily approval rate trend
+python3 claude-approval-report.py --trend week         # weekly trend buckets
+python3 claude-approval-report.py --trend month --since 30d  # monthly, last 30 days
 python3 claude-approval-report.py --session current --summary  # latest session only
 python3 claude-approval-report.py -o           # write to auto-named timestamped file
 ```
@@ -31,7 +34,7 @@ Everything lives in `claude-approval-report.py`. The processing pipeline:
 2. **Session parsing** (`process_session`) — reads JSONL files, correlates assistant tool_use blocks with user result records via `sourceToolAssistantUUID`/`toolUseID`, determines approval/rejection status
 3. **Risk classification** (`classify_risk`) — categorizes each tool call as destructive/mutating/read-only. Bash commands get sub-command-aware logic for git, curl, find, sed, ansible-playbook. Secret detection runs 22 provider-specific token regexes plus Shannon entropy on base64 blobs
 4. **Command normalization** (`normalize_command`) — groups variants (e.g., all `git add` invocations, all `ssh` to the same host) for aggregation
-5. **Rendering** — five output modes: full tables (`render_report`), compact dashboard (`render_summary`), JSON (`render_json`), single-command lookup (`render_why`), security settings generation (`render_generate_settings`)
+5. **Rendering** — six output modes: full tables (`render_report`), compact dashboard (`render_summary`), JSON (`render_json`), single-command lookup (`render_why`), security settings generation (`render_generate_settings`), time-series trend (`render_trend`)
 6. **Apply** (`apply_suggestions`) — writes suggested patterns to project `settings.local.json` files
 7. **Generate settings** (`render_generate_settings`) — emits deny rules + hook config as a mergeable JSON fragment, with data-driven analysis of actual secret exposures via `_find_secret_exposures`
 
