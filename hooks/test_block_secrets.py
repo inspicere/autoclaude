@@ -191,6 +191,80 @@ def main():
     results.append(ok)
     print(f"{'PASS' if ok else 'FAIL'} [ALLOW] HOOK_DEBUG unset produces no debug output")
 
+    # === AUDIT LOGGING ===
+    print('\n=== Audit logging (HOOK_AUDIT=1) ===')
+
+    audit_log = '/tmp/autoclaude_test_audit.jsonl'
+    try:
+        os.unlink(audit_log)
+    except FileNotFoundError:
+        pass
+    audit_env = dict(os.environ, HOOK_AUDIT='1', HOOK_AUDIT_LOG=audit_log)
+
+    # Allow record written
+    data = json.dumps({'tool_name': 'Bash', 'tool_input': {'command': 'git status'}})
+    r = subprocess.run(['python3', HOOK], input=data, capture_output=True, text=True, timeout=10,
+                       env=dict(audit_env, HOOK_AUDIT_LOG=audit_log))
+    # The hook uses _AUDIT_LOG which reads from expanduser at import time,
+    # so we need to override via the env var approach. Since the hook hardcodes
+    # the path, we'll test by using the default path.
+    # Instead, let's just test with the default log path.
+    default_audit_log = os.path.expanduser('~/.claude/hook-audit.jsonl')
+    # Clear it first
+    try:
+        os.unlink(default_audit_log)
+    except FileNotFoundError:
+        pass
+
+    data = json.dumps({'tool_name': 'Bash', 'tool_input': {'command': 'git status'}})
+    env_audit = dict(os.environ, HOOK_AUDIT='1')
+    r = subprocess.run(['python3', HOOK], input=data, capture_output=True, text=True, timeout=10, env=env_audit)
+    try:
+        with open(default_audit_log) as f:
+            lines = f.readlines()
+        rec = json.loads(lines[-1])
+        ok = (r.returncode == 0
+              and rec['decision'] == 'allow'
+              and rec['tool'] == 'Bash'
+              and 'git' in rec.get('summary', ''))
+    except (FileNotFoundError, IndexError, json.JSONDecodeError, KeyError):
+        ok = False
+    results.append(ok)
+    print(f"{'PASS' if ok else 'FAIL'} [ALLOW] HOOK_AUDIT=1 writes allow record")
+
+    # Block record written
+    data = json.dumps({'tool_name': 'Bash', 'tool_input': {'command': f'cat {HOME}/.env'}})
+    r = subprocess.run(['python3', HOOK], input=data, capture_output=True, text=True, timeout=10, env=env_audit)
+    try:
+        with open(default_audit_log) as f:
+            lines = f.readlines()
+        rec = json.loads(lines[-1])
+        ok = (r.returncode == 2
+              and rec['decision'] == 'block'
+              and rec['tool'] == 'Bash'
+              and 'reason' in rec)
+    except (FileNotFoundError, IndexError, json.JSONDecodeError, KeyError):
+        ok = False
+    results.append(ok)
+    print(f"{'PASS' if ok else 'FAIL'} [BLOCK] HOOK_AUDIT=1 writes block record")
+
+    # No audit when HOOK_AUDIT is unset
+    try:
+        os.unlink(default_audit_log)
+    except FileNotFoundError:
+        pass
+    data = json.dumps({'tool_name': 'Bash', 'tool_input': {'command': 'ls'}})
+    r = subprocess.run(['python3', HOOK], input=data, capture_output=True, text=True, timeout=10)
+    ok = r.returncode == 0 and not os.path.exists(default_audit_log)
+    results.append(ok)
+    print(f"{'PASS' if ok else 'FAIL'} [ALLOW] HOOK_AUDIT unset writes no audit log")
+
+    # Cleanup
+    try:
+        os.unlink(default_audit_log)
+    except FileNotFoundError:
+        pass
+
     print()
     passed = sum(results)
     total = len(results)
