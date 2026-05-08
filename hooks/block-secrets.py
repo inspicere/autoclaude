@@ -21,13 +21,36 @@ import math
 import os
 import re
 import sys
+import time
 
 _DEBUG = os.environ.get("HOOK_DEBUG", "") == "1"
+_AUDIT = os.environ.get("HOOK_AUDIT", "") == "1"
+_AUDIT_LOG = os.path.join(os.path.expanduser("~"), ".claude", "hook-audit.jsonl")
 
 
 def _debug(msg):
     if _DEBUG:
         print(f"[hook-debug] {msg}", file=sys.stderr)
+
+
+def _audit_log(decision, tool_name, summary="", reason=""):
+    """Append a structured JSON record to the audit log."""
+    if not _AUDIT:
+        return
+    record = {
+        "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "decision": decision,
+        "tool": tool_name,
+    }
+    if summary:
+        record["summary"] = summary[:200]
+    if reason:
+        record["reason"] = reason[:300]
+    try:
+        with open(_AUDIT_LOG, "a") as f:
+            f.write(json.dumps(record, separators=(",", ":")) + "\n")
+    except OSError:
+        pass
 
 
 # --- Token patterns (same as claude-approval-report.py) ---
@@ -807,8 +830,13 @@ _REMEDIATION_HINTS = (
 )
 
 
+_ctx_tool = ""
+_ctx_summary = ""
+
+
 def block(reason):
     _debug(f"decision: BLOCK — {reason[:80]}")
+    _audit_log("block", _ctx_tool, _ctx_summary, reason)
     hint = ""
     reason_lower = reason.lower()
     for pattern, h in _REMEDIATION_HINTS:
@@ -847,6 +875,9 @@ def main():
     tool_input = data.get("tool_input", {})
     _debug(f"tool_name={tool_name}")
 
+    global _ctx_tool, _ctx_summary
+    _ctx_tool = tool_name
+
     if tool_name in _PASSTHROUGH_TOOLS or tool_name.startswith("mcp__"):
         _debug(f"passthrough: {tool_name}")
         sys.exit(0)
@@ -861,6 +892,8 @@ def main():
             _debug("Bash: empty command, allowing")
             sys.exit(0)
         _debug(f"Bash command ({len(command)} chars)")
+        first_word = command.split()[0] if command.split() else ""
+        _ctx_summary = f"{first_word} ({len(command)} chars)"
 
         sub_cmds = _split_shell_commands(command)
         for m in _RE_COMMAND_SUBST.finditer(command):
@@ -937,6 +970,7 @@ def main():
     elif tool_name in ("Read", "Edit", "Write"):
         file_path = tool_input.get("file_path", "")
         _debug(f"{tool_name} file_path={file_path}")
+        _ctx_summary = file_path
         if file_path:
             reason = _check_file_path(file_path)
             if reason:
@@ -968,6 +1002,7 @@ def main():
                         block(f"BLOCKED: Written content contains: {reason}")
 
     _debug("decision: ALLOW")
+    _audit_log("allow", _ctx_tool, _ctx_summary)
     sys.exit(0)
 
 
