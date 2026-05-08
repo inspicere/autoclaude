@@ -110,6 +110,9 @@ _SENSITIVE_PATH_RE = re.compile(
 _FILE_READERS = frozenset({
     'cat', 'head', 'tail', 'less', 'more', 'bat', 'nl', 'tac', 'rev',
     'strings', 'xxd', 'od', 'hexdump', 'base64', 'source', '.',
+    'sort', 'paste', 'cut', 'fmt', 'fold', 'expand', 'pr', 'column',
+    'diff', 'cmp', 'comm', 'csplit', 'split', 'join', 'uniq', 'iconv',
+    'jq', 'yq', 'xq', 'script',
 })
 
 _FILE_COPIERS = frozenset({
@@ -117,7 +120,7 @@ _FILE_COPIERS = frozenset({
 })
 
 _COMMAND_WRAPPERS = frozenset({
-    'sudo', 'env', 'time', 'nice', 'timeout', 'nohup',
+    'sudo', 'env', 'time', 'nice', 'timeout', 'nohup', 'command', 'busybox',
 })
 
 _INTERPRETERS = frozenset({
@@ -125,6 +128,7 @@ _INTERPRETERS = frozenset({
 })
 
 _RE_COMMAND_SUBST = re.compile(r'\$\((.+?)\)', re.DOTALL)
+_RE_PROC_SUBST = re.compile(r'<\((.+?)\)', re.DOTALL)
 
 _SENSITIVE_DIRS_RE = re.compile(
     r'(?:^|/)\.(?:ssh|gnupg|aws|kube|docker)/?$'
@@ -146,6 +150,10 @@ _RE_EVAL = re.compile(
     re.DOTALL,
 )
 
+_RE_HEREDOC = re.compile(
+    r'<<\s*-?\s*[\'"]?(\w+)[\'"]?',
+)
+
 _RE_INTERP_FILE_READ = re.compile(
     r'''(?:open|Path)\s*\(\s*['"]([^'"]+)['"]'''
     r'''|File\.(?:read|open)\s*\(\s*['"]([^'"]+)['"]'''
@@ -165,7 +173,36 @@ def _shannon_entropy(data):
     return -sum((n / length) * math.log2(n / length) for n in counts.values())
 
 
+def _strip_quotes(s):
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in ('"', "'"):
+        return s[1:-1]
+    if s.startswith(("'", '"')):
+        return s[1:]
+    if s.endswith(("'", '"')):
+        return s[:-1]
+    return s
+
+
+_GLOB_CHARS = frozenset('*?[{')
+
+
+def _could_glob_match_sensitive(token):
+    """Check if a glob pattern could expand to match a sensitive path."""
+    if not any(c in token for c in _GLOB_CHARS):
+        return False
+    import fnmatch
+    pattern_basename = os.path.basename(token)
+    for sensitive_name in ('.env', '.env.local', '.env.production', '.env.development',
+                           '.pem', '.key', '.npmrc', '.pypirc', '.netrc', '.pgpass',
+                           '.my.cnf', '.git-credentials', '.bash_history', '.zsh_history',
+                           '.dev.vars', '.vault-token', '.vault_token'):
+        if fnmatch.fnmatch(sensitive_name, pattern_basename):
+            return True
+    return False
+
+
 def _is_sensitive_path(path):
+    path = _strip_quotes(path)
     path = os.path.expanduser(path)
     if not path.startswith('/'):
         path = '/' + path
@@ -174,6 +211,8 @@ def _is_sensitive_path(path):
         return False
     if path.endswith('.pub'):
         return False
+    if _could_glob_match_sensitive(path):
+        return True
     return bool(_SENSITIVE_PATH_RE.search(path))
 
 
@@ -307,7 +346,9 @@ def _strip_wrappers(parts):
                     idx += 1
                 else:
                     break
-        elif base in ('time', 'nice', 'nohup'):
+        elif base in ('time', 'nice', 'nohup', 'command'):
+            idx += 1
+        elif base == 'busybox':
             idx += 1
         elif base == 'timeout':
             idx += 1
@@ -380,11 +421,27 @@ def _check_single_command_access(command):
                     return f"Command reads sensitive file via dd: {path}"
 
     if base in ('curl', 'wget'):
-        for arg in parts[1:]:
+        for i, arg in enumerate(parts[1:], 1):
             if arg.lower().startswith('file://'):
                 path = arg[7:]
                 if _is_sensitive_path(path):
                     return f"Command reads sensitive file via {base}: {arg}"
+            if base == 'curl':
+                if arg.startswith('@') and _is_sensitive_path(arg[1:]):
+                    return f"Command uploads sensitive file via curl: {arg}"
+                if '=@' in arg:
+                    at_path = arg.split('=@', 1)[1]
+                    if _is_sensitive_path(at_path):
+                        return f"Command uploads sensitive file via curl: {arg}"
+                if arg in ('-T', '--upload-file') and i + 1 < len(parts):
+                    if _is_sensitive_path(parts[i + 1]):
+                        return f"Command uploads sensitive file via curl -T: {parts[i + 1]}"
+            if base == 'wget':
+                for prefix in ('--post-file=', '--input-file=', '--body-file='):
+                    if arg.startswith(prefix):
+                        path = arg[len(prefix):]
+                        if _is_sensitive_path(path):
+                            return f"Command reads sensitive file via wget: {arg}"
 
     if base in ('tar', 'zip'):
         for arg in parts[1:]:
@@ -402,6 +459,29 @@ def _check_single_command_access(command):
                 if _is_sensitive_path(host_path) or _SENSITIVE_DIRS_RE.search(expanded):
                     return f"Command mounts sensitive path into container: {host_path}"
 
+    if base == 'script':
+        for i, arg in enumerate(parts[1:], 1):
+            if arg in ('-c', '--command') and i + 1 <= len(parts) - 1:
+                inner = _strip_quotes(' '.join(parts[i + 1:]))
+                result = _check_single_command_access(inner)
+                if result:
+                    return f"script -c wraps blocked command: {result}"
+                break
+
+    if base == 'xargs':
+        remaining = [a for a in parts[1:] if not a.startswith('-')]
+        if remaining:
+            xargs_cmd = remaining[0]
+            if os.path.basename(xargs_cmd) in _FILE_READERS | _FILE_COPIERS:
+                return f"xargs invokes file-reading command: {xargs_cmd}"
+
+    if base == 'make':
+        for arg in parts[1:]:
+            if arg.startswith('-') and 'f' in arg:
+                continue
+            if _is_sensitive_path(arg):
+                return f"Command accesses sensitive file via make: {arg}"
+
     if base == 'eval':
         m = _RE_EVAL.search(cmd)
         if m:
@@ -414,13 +494,16 @@ def _check_single_command_access(command):
     for m in _RE_SHELL_EXEC.finditer(cmd):
         inner = m.group(1) or m.group(2)
         if inner:
-            result = _check_single_command_access(inner)
-            if result:
-                return f"Subshell wraps blocked command: {result}"
+            for inner_cmd in _split_shell_commands(inner):
+                result = _check_single_command_access(inner_cmd)
+                if result:
+                    return f"Subshell wraps blocked command: {result}"
 
     if base in _INTERPRETERS:
+        has_inline_flag = False
         for i, arg in enumerate(parts[1:], 1):
             if arg in ('-c', '-e', '-r') and i + 1 <= len(parts) - 1:
+                has_inline_flag = True
                 script = ' '.join(parts[i + 1:])
                 for fm in _RE_INTERP_FILE_READ.finditer(script):
                     path = (fm.group(1) or fm.group(2) or fm.group(3)
@@ -431,6 +514,12 @@ def _check_single_command_access(command):
                 if sensitive:
                     return f"Interpreter script references sensitive file: {sensitive}"
                 break
+        if not has_inline_flag:
+            for arg in parts[1:]:
+                if arg.startswith('-'):
+                    continue
+                if _is_sensitive_path(arg):
+                    return f"Interpreter accesses sensitive file: {arg}"
 
     for m in _RE_STDIN_REDIRECT.finditer(command):
         path = m.group(1).strip("\"'")
@@ -473,6 +562,19 @@ def main():
         sub_cmds = _split_shell_commands(command)
         for m in _RE_COMMAND_SUBST.finditer(command):
             sub_cmds.extend(_split_shell_commands(m.group(1)))
+        for m in _RE_PROC_SUBST.finditer(command):
+            sub_cmds.extend(_split_shell_commands(m.group(1)))
+
+        if _RE_HEREDOC.search(command):
+            stripped_full = _strip_prefixes(command.split('<<')[0].strip())
+            full_parts = _strip_wrappers(stripped_full.split())
+            if full_parts:
+                heredoc_base = os.path.basename(full_parts[0])
+                if heredoc_base in _INTERPRETERS:
+                    heredoc_body = command[command.index('<<'):]
+                    sensitive = _check_sensitive_paths_in_text(heredoc_body)
+                    if sensitive:
+                        block(f"BLOCKED: Heredoc to interpreter references sensitive file: {sensitive}")
 
         for sub_cmd in sub_cmds:
             stripped = _strip_prefixes(sub_cmd)
@@ -495,6 +597,20 @@ def main():
             reason = _check_file_path(file_path)
             if reason:
                 block(f"BLOCKED: {reason}")
+
+        content = tool_input.get("content", "") or tool_input.get("new_string", "")
+        if content:
+            _SCRIPT_COMMANDS = _FILE_READERS | _FILE_COPIERS | _INTERPRETERS | {'bash', 'sh', 'zsh', 'exec', 'eval'}
+            for line in content.splitlines():
+                line_stripped = line.strip()
+                if not line_stripped or line_stripped.startswith('#'):
+                    continue
+                first_word = line_stripped.split()[0] if line_stripped.split() else ''
+                first_word = os.path.basename(first_word)
+                if first_word in _SCRIPT_COMMANDS:
+                    reason = _check_single_command_access(line_stripped)
+                    if reason:
+                        block(f"BLOCKED: Written content contains: {reason}")
 
     sys.exit(0)
 
