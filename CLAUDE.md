@@ -26,7 +26,7 @@ python3 claude-approval-report.py --session current --summary  # latest session 
 python3 claude-approval-report.py -o           # write to auto-named timestamped file
 ```
 
-No dependencies beyond Python 3.8+ stdlib. The main script has no test suite — verify changes by running against live session data in `~/.claude/projects/`. The hooks have comprehensive test suites: `test_block_secrets.py` (48 tests), `test_bypass_fixes.py` (110 tests), `test_round2_bypass_fixes.py` (50 tests), `test_fp_fixes.py` (28 tests), `test_infra_usability.py` (136 tests), `test_warn_secrets.py` (12 tests) — 384 total.
+No dependencies beyond Python 3.8+ stdlib. The main script has no test suite — verify changes by running against live session data in `~/.claude/projects/`. The hooks have comprehensive test suites: `test_block_secrets.py` (59 tests), `test_bypass_fixes.py` (110 tests), `test_round2_bypass_fixes.py` (50 tests), `test_fp_fixes.py` (28 tests), `test_infra_usability.py` (136 tests), `test_warn_secrets.py` (12 tests) — 395 total.
 
 ## Architecture
 
@@ -139,7 +139,7 @@ A two-round multi-agent red team engagement on 2026-05-08 targeted the hooks wit
 
 ## Known Issues (from 2026-05-07 adversarial audit) — ALL RESOLVED
 
-A comprehensive adversarial audit on 2026-05-07 identified 32 bypass vectors and 22 code quality issues. All findings were remediated same-day in commits `275ee75` (hooks), `7f271f4` (main script), `20bdfb1` (docs). Test suites added: `test_block_secrets.py` (48 tests), `test_warn_secrets.py` (12 tests).
+A comprehensive adversarial audit on 2026-05-07 identified 32 bypass vectors and 22 code quality issues. All findings were remediated same-day in commits `275ee75` (hooks), `7f271f4` (main script), `20bdfb1` (docs). Test suites added: `test_block_secrets.py` (59 tests), `test_warn_secrets.py` (12 tests).
 
 ### Critical (4) — FIXED in commit `275ee75`
 1. ~~`_RE_SECRET_ASSIGN` regex catastrophic backtracking~~ — atomic-group-style rewrite
