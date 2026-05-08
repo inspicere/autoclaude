@@ -194,14 +194,26 @@ Add to `hooks` in `~/.claude/settings.json`:
 - JWT tokens, private key headers, curl Authorization headers
 - Secret variable assignments (`VAULT_TOKEN=s.xxx`) with smart filtering to avoid false positives on variable references and URLs
 - High-entropy base64 blobs (Shannon entropy >= 3.5)
-- File-reading commands (`cat`, `head`, `tail`, `base64`, etc.) targeting sensitive paths (`.env*`, `.ssh/id_*`, `.aws/credentials`, `/etc/shadow`, etc.)
+- 45+ file-reading commands (`cat`, `head`, `tail`, `base64`, `sort`, `cut`, `jq`, `shuf`, `zcat`, `bzcat`, etc.) targeting sensitive paths (`.env*`, `.ssh/id_*`, `.aws/credentials`, `/etc/shadow`, etc.)
 - Subshell wrapping (`bash -c 'cat .env'`, `sh -c`, `zsh -c`) — unwraps and recursively re-checks
 - Eval wrapping (`eval 'cat .env'`) — unwraps and recursively re-checks
-- Interpreter file I/O (`python3 -c "open('.env').read()"`, `perl -e`, `ruby -e`, `node -e`) — detects `open()`, `File.read()`, and sensitive path references in inline scripts
+- Interpreter file I/O (`python3 -c "open('.env').read()"`, `perl -e`, `ruby -e`, `node -e`, `node --eval`) — detects `open()`, `File.read()`, and sensitive path references in inline scripts
 - File copy/move/link commands (`cp .env /tmp/x`, `mv`, `ln`, `install`, `rsync`) — blocks when source is a sensitive path
 - `dd if=<sensitive-path>` — parses the `if=` parameter
 - Shell stdin redirection (`< .env`, `while read line; do ...; done < .env`)
 - Read/Edit tool calls targeting the same sensitive paths
+- Process substitution (`<(cat .env)`) — extracts and checks inner commands
+- Heredoc-to-interpreter (`python3 <<EOF ... open('.env') ... EOF`) — scans heredoc body
+- Backtick command substitution (`` `cat .env` ``) — extracts and checks inner commands
+- Pipe-to-shell injection (`echo 'cat .env' | bash`) — detects piped shell execution
+- Subshell `(cmd)` and brace group `{ cmd; }` unwrapping
+- Variable assignment tracking (`F=.env; cat $F`) — follows variable values to detect indirect references
+- SSH remote command execution (`ssh host cat .env`) — scans remote command arguments
+- `xargs -a`/`--arg-file` flag detection for sensitive file arguments
+- Shell positional args after `bash -c` (`bash -c 'cat "$1"' _ .env`)
+- Long-form file flags (`--from-file=`, `--files0-from=`, `openssl -in`)
+- While-read loop variable tracking (`while read F; do cat $F; done`)
+- Command wrappers (`sudo`, `env`, `time`, `command`, `busybox`, `stdbuf`, `ionice`, `numactl`, `taskset`, `chrt`, `script -c`)
 
 ### What it allows
 
@@ -216,7 +228,7 @@ Add to `hooks` in `~/.claude/settings.json`:
 - **Copy-then-read**: The hook blocks `cp`, `mv`, `ln`, `install`, and `rsync` when the source is a sensitive path, preventing the first step of a copy-then-read chain. However, if a sensitive file was copied to a non-sensitive path *before* the hook was installed, the copy is not tracked. For defense in depth, use filesystem-level controls (mandatory access control, audit logging) on sensitive files.
 - **Output capture**: The PreToolUse hook inspects commands *before* execution but cannot inspect command *output*. A `vault kv get` that prints secrets to stdout will not be blocked by it. **Mitigation:** The `warn-secrets-output.py` PostToolUse hook scans Bash output for known token patterns, JWTs, and private key material, then warns Claude not to use the values and advises the user to rotate. MCP servers remain the preferred path — auth stays server-side and secrets never enter the session.
 - **Encoded payloads**: Base64-encoded or obfuscated secrets that don't match known token patterns and fall below the entropy threshold (Shannon entropy < 3.5 on 32+ char strings) will pass through. **Mitigation:** Lowering the entropy threshold increases false positives on legitimate base64 data. A decode-then-rescan approach is possible but adds latency and complexity. The current threshold is a pragmatic balance — most real secrets exceed 3.5 bits/char.
-- **Variable/runtime indirection** (2026-05-08): Static analysis cannot follow shell variable expansion (`F=.env && cat "$F"`) or `find -exec`. `xargs` with file-reading commands is now blocked, but indirect references through variables remain a fundamental limitation of pre-execution static analysis.
+- **Variable/runtime indirection** (2026-05-08): Simple variable assignment tracking was added (`F=.env; cat $F` is now detected), along with while-read loop variable tracking and `xargs -a`/`--arg-file` detection. However, shell function indirection (`r() { cat "$1"; }; r .env`), bash array expansion (`a=(cat .env); "${a[@]}"`), and runtime path construction in scripts remain undetectable — fundamental limitations of pre-execution static analysis.
 
 ## PostToolUse hook: warn-secrets-output.py
 
