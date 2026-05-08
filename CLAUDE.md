@@ -19,7 +19,7 @@ python3 claude-approval-report.py --session current --summary  # latest session 
 python3 claude-approval-report.py -o           # write to auto-named timestamped file
 ```
 
-No dependencies beyond Python 3.8+ stdlib. The main script has no test suite — verify changes by running against live session data in `~/.claude/projects/`. The hooks have comprehensive test suites: `test_block_secrets.py` (48 tests), `test_bypass_fixes.py` (67 tests), `test_round2_bypass_fixes.py` (50 tests), `test_fp_fixes.py` (28 tests), `test_warn_secrets.py` (12 tests) — 205 total.
+No dependencies beyond Python 3.8+ stdlib. The main script has no test suite — verify changes by running against live session data in `~/.claude/projects/`. The hooks have comprehensive test suites: `test_block_secrets.py` (48 tests), `test_bypass_fixes.py` (110 tests), `test_round2_bypass_fixes.py` (50 tests), `test_fp_fixes.py` (28 tests), `test_infra_usability.py` (136 tests), `test_warn_secrets.py` (12 tests) — 384 total.
 
 ## Architecture
 
