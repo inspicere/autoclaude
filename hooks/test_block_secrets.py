@@ -111,6 +111,24 @@ def main():
     results.append(bash('grep PASSWORD /tmp/config.txt', False))
     results.append(bash('vault kv get secret/db', False))
 
+    # === SYMLINK RESOLUTION ===
+    print('\n=== Symlink resolution ===')
+
+    symlink_path = '/tmp/autoclaude_test_symlink_env'
+    try:
+        os.unlink(symlink_path)
+    except FileNotFoundError:
+        pass
+    os.symlink(os.path.join(HOME, '.env'), symlink_path)
+    try:
+        results.append(bash(f'cat {symlink_path}', True))
+        results.append(test_hook('Read', {'file_path': symlink_path}, True))
+    finally:
+        os.unlink(symlink_path)
+
+    # .. traversal
+    results.append(bash(f'cat /tmp/../{HOME.lstrip("/")}/.env', True))
+
     # === FAIL-CLOSED: Error handling ===
     print('\n=== Fail-closed error handling ===')
 
