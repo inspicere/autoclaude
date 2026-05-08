@@ -103,8 +103,14 @@ def _has_high_entropy_blob(tokens):
         if clean.startswith(("/", ".", "~")):
             continue
         if len(clean) >= 32 and re.match(r'^[A-Za-z0-9+/=]+$', clean):
-            if _shannon_entropy(clean) >= 3.5:
+            ent = _shannon_entropy(clean)
+            if ent >= 3.5:
                 return True
+            if ent >= 3.0:
+                unique_ratio = len(set(clean)) / len(clean)
+                max_freq = max(clean.count(c) for c in set(clean)) / len(clean)
+                if unique_ratio >= 0.4 and max_freq <= 0.15:
+                    return True
     return False
 
 
@@ -118,8 +124,14 @@ def redact_secrets(text):
         val = m.group(0)
         if val.startswith(("/", ".", "~")):
             return val
-        if _shannon_entropy(val) >= 3.5:
+        ent = _shannon_entropy(val)
+        if ent >= 3.5:
             return '<REDACTED>'
+        if ent >= 3.0 and len(val) >= 32:
+            unique_ratio = len(set(val)) / len(val)
+            max_freq = max(val.count(c) for c in set(val)) / len(val)
+            if unique_ratio >= 0.4 and max_freq <= 0.15:
+                return '<REDACTED>'
         return val
     text = _RE_BASE64_BLOB.sub(_redact_b64, text)
     return text
