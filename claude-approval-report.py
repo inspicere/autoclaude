@@ -7,6 +7,7 @@ import math
 import os
 import re
 import sys
+import tempfile
 from collections import defaultdict, Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1017,6 +1018,25 @@ def _collect_applicable(all_records, risk_level="read-only", min_approvals=3):
     return by_project, pattern_projects
 
 
+def _atomic_write(out_path, write_fn, mode=0o644):
+    """Write to out_path atomically via tempfile + rename."""
+    dir_path = os.path.dirname(os.path.abspath(out_path))
+    fd, tmp_path = tempfile.mkstemp(dir=dir_path, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            write_fn(f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp_path, mode)
+        os.rename(tmp_path, str(out_path))
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
 def _write_settings(path, settings, dry_run):
     """Write settings JSON to path unless dry_run."""
     if dry_run:
@@ -1024,9 +1044,10 @@ def _write_settings(path, settings, dry_run):
     if not path.parent.exists():
         print(f"    Skipping: {path.parent} does not exist", file=sys.stderr)
         return
-    with open(path, "w") as f:
+    def _do_write(f):
         json.dump(settings, f, indent=2)
         f.write("\n")
+    _atomic_write(path, _do_write, mode=0o600)
 
 
 def _load_settings(path):
@@ -1825,8 +1846,7 @@ def main():
                 out_path = os.path.join(args.output, f"claude-security-settings-{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H%M%SZ')}.json")
             else:
                 out_path = args.output
-            with open(out_path, "w") as f:
-                render_generate_settings(all_records, out=f)
+            _atomic_write(out_path, lambda f: render_generate_settings(all_records, out=f))
             print(f"Settings written to {out_path}", file=sys.stderr)
         return
 
@@ -1874,8 +1894,7 @@ def main():
                 out_path = os.path.join(args.output, f"claude-trend-{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H%M%SZ')}.txt")
             else:
                 out_path = args.output
-            with open(out_path, "w") as f:
-                render_trend(all_records, bucket=trend_bucket, out=f)
+            _atomic_write(out_path, lambda f: render_trend(all_records, bucket=trend_bucket, out=f))
             print(f"Trend written to {out_path}", file=sys.stderr)
     else:
         if args.summary:
@@ -1896,8 +1915,7 @@ def main():
                 out_path = os.path.join(args.output, f"claude-approval-report-{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H%M%SZ')}{ext}")
             else:
                 out_path = args.output
-            with open(out_path, "w") as f:
-                renderer(all_records, out=f)
+            _atomic_write(out_path, lambda f: renderer(all_records, out=f))
             print(f"Report written to {out_path}", file=sys.stderr)
 
 
