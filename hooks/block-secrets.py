@@ -113,6 +113,22 @@ _FILE_READERS = frozenset({
     'sort', 'paste', 'cut', 'fmt', 'fold', 'expand', 'pr', 'column',
     'diff', 'cmp', 'comm', 'csplit', 'split', 'join', 'uniq', 'iconv',
     'jq', 'yq', 'xq', 'script',
+    # Additional content-reading tools (round 2 audit)
+    'shuf', 'unexpand', 'colrm', 'look', 'tsort', 'ptx', 'nkf',
+    'uuencode', 'base32', 'zcat', 'bzcat', 'xzcat', 'lz4', 'vidir',
+})
+
+# Tools that accept a sensitive file via -flag VALUE (separate token, not -flag=VALUE)
+# Maps command name -> set of flags whose next argument is a file path
+_FILE_FLAG_ARGS = {
+    'openssl': {'-in', '-inkey', '-certfile', '-CAfile'},
+}
+
+# Long-option prefixes whose value (after '=') is a file path, for _FILE_READERS members
+_LONG_FILE_FLAGS = frozenset({
+    '--from-file=', '--old-file=', '--new-file=',       # diff
+    '--files0-from=',                                    # sort
+    '--input-file=', '--file=',                          # various
 })
 
 _FILE_COPIERS = frozenset({
@@ -121,6 +137,7 @@ _FILE_COPIERS = frozenset({
 
 _COMMAND_WRAPPERS = frozenset({
     'sudo', 'env', 'time', 'nice', 'timeout', 'nohup', 'command', 'busybox',
+    'stdbuf', 'ionice', 'numactl', 'taskset', 'chrt',
 })
 
 _INTERPRETERS = frozenset({
@@ -129,6 +146,7 @@ _INTERPRETERS = frozenset({
 
 _RE_COMMAND_SUBST = re.compile(r'\$\((.+?)\)', re.DOTALL)
 _RE_PROC_SUBST = re.compile(r'<\((.+?)\)', re.DOTALL)
+_RE_BACKTICK_SUBST = re.compile(r'`(.+?)`', re.DOTALL)
 
 _SENSITIVE_DIRS_RE = re.compile(
     r'(?:^|/)\.(?:ssh|gnupg|aws|kube|docker)/?$'
@@ -262,13 +280,37 @@ def _check_command_secrets(command):
     return None
 
 
+def _unwrap_grouping(command):
+    """Unwrap outer ( ... ) subshell or { ...; } brace grouping, returning inner text or None."""
+    s = command.strip()
+    s = s.rstrip('& \t')
+    if s.startswith('(') and s.endswith(')'):
+        return s[1:-1].strip()
+    if s.startswith('{') and s.endswith('}'):
+        inner = s[1:-1].strip()
+        if inner.endswith(';'):
+            inner = inner[:-1].strip()
+        return inner
+    return None
+
+
 def _split_shell_commands(command):
-    """Split a shell command on ;, &&, ||, | respecting quotes."""
+    """Split a shell command on ;, &&, ||, | respecting quotes.
+
+    Also unwraps outer ( ) subshells and { } brace groups so that
+    (cat file) and { cat file; } are not treated as atomic opaque tokens.
+    """
+    # Unwrap outer grouping so (cat .env) and { cat .env; } are traversed
+    unwrapped = _unwrap_grouping(command)
+    if unwrapped is not None:
+        return _split_shell_commands(unwrapped)
+
     commands = []
     current = []
     i = 0
     in_sq = False
     in_dq = False
+    paren_depth = 0
 
     while i < len(command):
         c = command[i]
@@ -286,7 +328,16 @@ def _split_shell_commands(command):
             in_dq = not in_dq
             current.append(c)
         elif not in_sq and not in_dq:
-            if c == ';':
+            if c == '(':
+                paren_depth += 1
+                current.append(c)
+            elif c == ')':
+                paren_depth -= 1
+                current.append(c)
+            elif paren_depth > 0:
+                # Inside nested parens — collect verbatim, don't split
+                current.append(c)
+            elif c == ';':
                 cmd = ''.join(current).strip()
                 if cmd:
                     commands.append(cmd)
@@ -318,7 +369,74 @@ def _split_shell_commands(command):
     if cmd:
         commands.append(cmd)
 
-    return commands
+    # Post-process: for any segment that is a bare shell interpreter (sh, bash, zsh)
+    # preceded by a pipe, the previous segment's string content is the injected command.
+    # We detect this by scanning the segments list for shell-interpreter-only segments.
+    _RE_QUOTED_ARG = re.compile(r"""'([^']*)'|"((?:[^"\\]|\\.)*)"|(\S+)""")
+
+    result = []
+    for idx, seg in enumerate(commands):
+        result.append(seg)
+        stripped = _strip_prefixes(seg).strip()
+        parts = stripped.split()
+        if parts and os.path.basename(parts[0]) in ('sh', 'bash', 'zsh', 'dash'):
+            # This segment is a bare shell interpreter — the previous segment may
+            # feed commands to it. Re-check the previous segment's content
+            # as a potential command string passed to the interpreter.
+            if idx > 0:
+                prev = commands[idx - 1]
+                prev_stripped = _strip_prefixes(prev).strip()
+                # Parse the previous segment's tokens respecting quotes
+                prev_tokens = []
+                for m in _RE_QUOTED_ARG.finditer(prev_stripped):
+                    prev_tokens.append(m.group(1) or m.group(2) or m.group(3) or '')
+                if prev_tokens and os.path.basename(prev_tokens[0]) in ('echo', 'printf'):
+                    # Collect all non-flag arguments and join them (they form the command)
+                    inner_parts = [t for t in prev_tokens[1:] if not t.startswith('-')]
+                    if inner_parts:
+                        inner = ' '.join(inner_parts)
+                        result.extend(_split_shell_commands(inner))
+
+    # Post-process: detect while read VAR; do ... done loops where
+    # a sensitive path flows via pipe into the loop variable.
+    # Pattern: prev segment echoes/cats a sensitive path, next segment is 'while read VAR'
+    final = []
+    for idx, seg in enumerate(result):
+        final.append(seg)
+        seg_stripped = seg.strip()
+        m_while = re.match(r'\bwhile\s+read\s+(\w+)', seg_stripped)
+        if m_while and idx > 0:
+            loop_var = m_while.group(1)
+            prev_seg = result[idx - 1]
+            prev_parts = prev_seg.split()
+            if prev_parts:
+                prev_base = os.path.basename(_strip_prefixes(prev_seg).split()[0]) if prev_seg.strip() else ''
+                # If the preceding command passes a sensitive path as an arg to echo/printf/cat/etc
+                for arg in prev_parts[1:]:
+                    if not arg.startswith('-') and _is_sensitive_path(arg.strip("\"'")):
+                        # The loop variable receives this path — look for cat/file-readers in loop body
+                        # Collect segments until 'done'
+                        for j in range(idx + 1, len(result)):
+                            body_seg = result[j].strip()
+                            if body_seg in ('done', 'fi', 'esac'):
+                                break
+                            # Strip leading shell keywords: do, then, else, elif
+                            body_seg_stripped = re.sub(r'^(?:do|then|else|elif)\s+', '', body_seg)
+                            body_parts = body_seg_stripped.split()
+                            if body_parts:
+                                body_base = os.path.basename(body_parts[0])
+                                if body_base in _FILE_READERS | _FILE_COPIERS:
+                                    for barg in body_parts[1:]:
+                                        clean = barg.strip("\"'")
+                                        varname = None
+                                        if clean.startswith('${') and clean.endswith('}'):
+                                            varname = clean[2:-1]
+                                        elif clean.startswith('$'):
+                                            varname = clean[1:].split('/')[0]
+                                        if varname == loop_var:
+                                            final.append(f"SENSITIVE_VAR_LOOP:{arg}")
+
+    return final
 
 
 def _strip_prefixes(cmd):
@@ -350,6 +468,14 @@ def _strip_wrappers(parts):
             idx += 1
         elif base == 'busybox':
             idx += 1
+        elif base == 'stdbuf':
+            idx += 1
+            while idx < len(parts) and parts[idx].startswith('-'):
+                idx += 1
+        elif base in ('ionice', 'numactl', 'taskset', 'chrt'):
+            idx += 1
+            while idx < len(parts) and (parts[idx].startswith('-') or parts[idx].isdigit()):
+                idx += 1
         elif base == 'timeout':
             idx += 1
             while idx < len(parts) and parts[idx].startswith('-'):
@@ -389,9 +515,34 @@ def _check_single_command_access(command):
     if base in _FILE_READERS:
         for arg in parts[1:]:
             if arg.startswith('-'):
+                # Check --flag=value long options that embed a file path
+                for prefix in _LONG_FILE_FLAGS:
+                    if arg.startswith(prefix):
+                        val = arg[len(prefix):]
+                        if _is_sensitive_path(val):
+                            return f"Command reads sensitive file via {arg[:arg.index('=')]}: {val}"
                 continue
             if _is_sensitive_path(arg):
                 return f"Command reads sensitive file: {arg}"
+
+    if base in _FILE_FLAG_ARGS:
+        flag_set = _FILE_FLAG_ARGS[base]
+        skip_next = False
+        for i, arg in enumerate(parts[1:], 1):
+            if skip_next:
+                if _is_sensitive_path(arg):
+                    return f"Command reads sensitive file via {base}: {arg}"
+                skip_next = False
+                continue
+            if arg in flag_set:
+                skip_next = True
+                continue
+            # Also handle --flag=value form for these tools
+            for flag in flag_set:
+                if arg.startswith(flag + '='):
+                    val = arg[len(flag) + 1:]
+                    if _is_sensitive_path(val):
+                        return f"Command reads sensitive file via {base} {flag}: {val}"
 
     if base in _FILE_COPIERS:
         if base == 'scp':
@@ -469,6 +620,14 @@ def _check_single_command_access(command):
                 break
 
     if base == 'xargs':
+        for i, arg in enumerate(parts[1:], 1):
+            if arg in ('-a', '--arg-file') and i + 1 < len(parts):
+                if _is_sensitive_path(parts[i + 1]):
+                    return f"xargs reads sensitive file via {arg}: {parts[i + 1]}"
+            if arg.startswith('--arg-file='):
+                val = arg.split('=', 1)[1]
+                if _is_sensitive_path(val):
+                    return f"xargs reads sensitive file via --arg-file: {val}"
         remaining = [a for a in parts[1:] if not a.startswith('-')]
         if remaining:
             xargs_cmd = remaining[0]
@@ -491,18 +650,80 @@ def _check_single_command_access(command):
                 if result:
                     return f"eval wraps blocked command: {result}"
 
+    if base in ('bash', 'sh', 'zsh', 'dash', 'ksh'):
+        in_c_mode = False
+        c_end_idx = 0
+        for i, arg in enumerate(parts[1:], 1):
+            if arg == '-c':
+                in_c_mode = True
+                c_end_idx = i + 1
+                if c_end_idx < len(parts):
+                    c_end_idx += 1
+                break
+        if in_c_mode:
+            for arg in parts[c_end_idx:]:
+                if arg == '--' or arg == '_':
+                    continue
+                if _is_sensitive_path(arg):
+                    return f"Shell positional argument is sensitive file: {arg}"
+
+    if base == 'ssh':
+        non_flag_args = []
+        skip_next = False
+        for arg in parts[1:]:
+            if skip_next:
+                skip_next = False
+                continue
+            if arg.startswith('-'):
+                if arg in ('-p', '-l', '-i', '-o', '-F', '-J', '-L', '-R', '-D', '-W', '-b', '-c', '-m', '-S', '-E'):
+                    skip_next = True
+                continue
+            non_flag_args.append(arg)
+        if len(non_flag_args) >= 2:
+            remote_cmd_args = non_flag_args[1:]
+            for arg in remote_cmd_args:
+                if _is_sensitive_path(arg):
+                    return f"SSH remote command accesses sensitive file: {arg}"
+
     for m in _RE_SHELL_EXEC.finditer(cmd):
         inner = m.group(1) or m.group(2)
         if inner:
-            for inner_cmd in _split_shell_commands(inner):
+            inner_cmds = _split_shell_commands(inner)
+            # Track variable assignments within the subshell content
+            _RE_INNER_VAR = re.compile(r'^(?:export\s+)?(\w+)=(\S+)')
+            inner_sensitive_vars = set()
+            for ic in inner_cmds:
+                mv = _RE_INNER_VAR.match(ic.strip())
+                if mv:
+                    val = mv.group(2).strip("\"'")
+                    if _is_sensitive_path(val):
+                        inner_sensitive_vars.add(mv.group(1))
+            for inner_cmd in inner_cmds:
                 result = _check_single_command_access(inner_cmd)
                 if result:
                     return f"Subshell wraps blocked command: {result}"
+                # Check variable indirection within subshell
+                if inner_sensitive_vars:
+                    ic_stripped = _strip_prefixes(inner_cmd)
+                    ic_parts = _strip_wrappers(ic_stripped.split()) if ic_stripped.split() else []
+                    if ic_parts:
+                        ic_base = os.path.basename(ic_parts[0])
+                        if ic_base in _FILE_READERS | _FILE_COPIERS | {'eval', 'exec'}:
+                            for arg in ic_parts[1:]:
+                                clean = arg.strip("\"'")
+                                varname = None
+                                if clean.startswith('${') and clean.endswith('}'):
+                                    varname = clean[2:-1]
+                                elif clean.startswith('$'):
+                                    varname = clean[1:].split('/')[0]
+                                if varname and varname in inner_sensitive_vars:
+                                    return f"Subshell accesses sensitive file via variable ${varname}"
 
     if base in _INTERPRETERS:
         has_inline_flag = False
+        _INLINE_FLAGS = {'-c', '-e', '-r', '--eval', '--exec', '--print', '--require', '--command'}
         for i, arg in enumerate(parts[1:], 1):
-            if arg in ('-c', '-e', '-r') and i + 1 <= len(parts) - 1:
+            if arg in _INLINE_FLAGS and i + 1 <= len(parts) - 1:
                 has_inline_flag = True
                 script = ' '.join(parts[i + 1:])
                 for fm in _RE_INTERP_FILE_READ.finditer(script):
@@ -564,17 +785,31 @@ def main():
             sub_cmds.extend(_split_shell_commands(m.group(1)))
         for m in _RE_PROC_SUBST.finditer(command):
             sub_cmds.extend(_split_shell_commands(m.group(1)))
+        for m in _RE_BACKTICK_SUBST.finditer(command):
+            sub_cmds.extend(_split_shell_commands(m.group(1)))
 
+        _HEREDOC_SHELLS = _INTERPRETERS | {'bash', 'sh', 'zsh', 'dash', 'ksh'}
         if _RE_HEREDOC.search(command):
             stripped_full = _strip_prefixes(command.split('<<')[0].strip())
             full_parts = _strip_wrappers(stripped_full.split())
             if full_parts:
                 heredoc_base = os.path.basename(full_parts[0])
-                if heredoc_base in _INTERPRETERS:
+                if heredoc_base in _HEREDOC_SHELLS:
                     heredoc_body = command[command.index('<<'):]
                     sensitive = _check_sensitive_paths_in_text(heredoc_body)
                     if sensitive:
                         block(f"BLOCKED: Heredoc to interpreter references sensitive file: {sensitive}")
+
+        # Variable-indirection tracking: find VAR=sensitive_path assignments,
+        # then flag any command that uses $VAR or ${VAR} as an argument.
+        _RE_VAR_ASSIGN = re.compile(r'^(?:export\s+)?(\w+)=(\S+)')
+        sensitive_vars = set()
+        for sub_cmd in sub_cmds:
+            m_assign = _RE_VAR_ASSIGN.match(sub_cmd.strip())
+            if m_assign:
+                val = m_assign.group(2).strip("\"'")
+                if _is_sensitive_path(val):
+                    sensitive_vars.add(m_assign.group(1))
 
         for sub_cmd in sub_cmds:
             stripped = _strip_prefixes(sub_cmd)
@@ -590,6 +825,30 @@ def main():
             reason = _check_single_command_access(sub_cmd)
             if reason:
                 block(f"BLOCKED: {reason}")
+
+            # Check for while-read-loop sentinel inserted by _split_shell_commands
+            if sub_cmd.startswith('SENSITIVE_VAR_LOOP:'):
+                path = sub_cmd[len('SENSITIVE_VAR_LOOP:'):]
+                block(f"BLOCKED: while-read loop reads sensitive file via pipe: {path}")
+
+            # Check for variable-indirection: cat $TFILE where TFILE holds a sensitive path
+            if sensitive_vars:
+                sub_parts = stripped.split()
+                sub_parts = _strip_wrappers(sub_parts) if sub_parts else sub_parts
+                if sub_parts:
+                    sub_base = os.path.basename(sub_parts[0])
+                    check_set = _FILE_READERS | _FILE_COPIERS | {'eval', 'exec'}
+                    if sub_base in check_set:
+                        for arg in sub_parts[1:]:
+                            # Match $VAR, ${VAR}, "$VAR", "${VAR}"
+                            clean = arg.strip("\"'")
+                            varname = None
+                            if clean.startswith('${') and clean.endswith('}'):
+                                varname = clean[2:-1]
+                            elif clean.startswith('$'):
+                                varname = clean[1:].split('/')[0]
+                            if varname and varname in sensitive_vars:
+                                block(f"BLOCKED: Command accesses sensitive file via variable ${varname}")
 
     elif tool_name in ("Read", "Edit", "Write"):
         file_path = tool_input.get("file_path", "")
