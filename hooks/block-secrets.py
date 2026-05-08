@@ -190,6 +190,8 @@ _RE_INTERP_FILE_READ = re.compile(
     r'''|file_get_contents\s*\(\s*['"]([^'"]+)['"]'''
 )
 
+_RE_QUOTED_ARG = re.compile(r"""'([^']*)'|"((?:[^"\\]|\\.)*)"|(\S+)""")
+
 
 def _shannon_entropy(data):
     if not data:
@@ -379,8 +381,6 @@ def _split_shell_commands(command):
     # Post-process: for any segment that is a bare shell interpreter (sh, bash, zsh)
     # preceded by a pipe, the previous segment's string content is the injected command.
     # We detect this by scanning the segments list for shell-interpreter-only segments.
-    _RE_QUOTED_ARG = re.compile(r"""'([^']*)'|"((?:[^"\\]|\\.)*)"|(\S+)""")
-
     result = []
     for idx, seg in enumerate(commands):
         result.append(seg)
