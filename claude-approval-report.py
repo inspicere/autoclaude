@@ -1313,23 +1313,33 @@ def render_trend(all_records, bucket="day", out=None):
     sorted_keys = sorted(buckets.keys())
 
     label = {"day": "Day", "week": "Week of", "month": "Month"}.get(bucket, "Period")
+    hdr = f"  {label:<12} {'Total':>7} {'Auto':>7} {'Prompted':>10} {'Rej':>4} {'Auto%':>6} {'Destr':>6} {'Mutat':>7} {'R/O':>7} {'Sec':>4}"
+    sep = f"  {'-'*12} {'-'*7} {'-'*7} {'-'*10} {'-'*4} {'-'*6} {'-'*7} {'-'*7} {'-'*7} {'-'*4}"
     _print(f"CLAUDE CODE TREND ANALYSIS (by {bucket})")
-    _print(f"{'='*90}")
-    _print(f"  {label:<12} {'Total':>6} {'Auto':>6} {'Prompted':>8} {'Rej':>4} {'Auto%':>6} {'Destr':>6} {'Mutat':>6} {'R/O':>6} {'Sec':>4}")
-    _print(f"  {'-'*12} {'-'*6} {'-'*6} {'-'*8} {'-'*4} {'-'*6} {'-'*6} {'-'*6} {'-'*6} {'-'*4}")
+    _print("=" * len(hdr))
+    _print(hdr)
+    _print(sep)
+
+    def fmt_row(key, b, arrow=""):
+        auto_pct = (b["auto"] / b["total"] * 100) if b["total"] else 0
+        prompted_s = f"{b['prompted']:,}"
+        if arrow:
+            prompted_s += " " + arrow
+        return (f"  {key:<12} {b['total']:>7,} {b['auto']:>7,} {prompted_s:>10}"
+                f" {b['rejected']:>4} {auto_pct:>5.1f}% {b['destructive']:>6}"
+                f" {b['mutating']:>7,} {b['read-only']:>7,} {b['secrets']:>4}")
 
     prev_prompted = None
     for key in sorted_keys:
         b = buckets[key]
-        auto_pct = (b["auto"] / b["total"] * 100) if b["total"] else 0
         arrow = ""
         if prev_prompted is not None and b["prompted"] > 0:
             if b["prompted"] < prev_prompted:
-                arrow = " ↓"
+                arrow = "↓"
             elif b["prompted"] > prev_prompted:
-                arrow = " ↑"
+                arrow = "↑"
         prev_prompted = b["prompted"]
-        _print(f"  {key:<12} {b['total']:>6,} {b['auto']:>6,} {b['prompted']:>8,}{arrow:<2} {b['rejected']:>4} {auto_pct:>5.1f}% {b['destructive']:>6} {b['mutating']:>6,} {b['read-only']:>6,} {b['secrets']:>4}")
+        _print(fmt_row(key, b, arrow))
 
     totals = {"total": 0, "auto": 0, "prompted": 0, "rejected": 0,
               "destructive": 0, "mutating": 0, "read-only": 0, "secrets": 0}
@@ -1337,9 +1347,8 @@ def render_trend(all_records, bucket="day", out=None):
         for k in totals:
             totals[k] += b[k]
 
-    _print(f"  {'-'*12} {'-'*6} {'-'*6} {'-'*8} {'-'*4} {'-'*6} {'-'*6} {'-'*6} {'-'*6} {'-'*4}")
-    total_auto_pct = (totals["auto"] / totals["total"] * 100) if totals["total"] else 0
-    _print(f"  {'TOTAL':<12} {totals['total']:>6,} {totals['auto']:>6,} {totals['prompted']:>8,}    {totals['rejected']:>4} {total_auto_pct:>5.1f}% {totals['destructive']:>6} {totals['mutating']:>6,} {totals['read-only']:>6,} {totals['secrets']:>4}")
+    _print(sep)
+    _print(fmt_row("TOTAL", totals))
 
     if len(sorted_keys) >= 2:
         first = buckets[sorted_keys[0]]
