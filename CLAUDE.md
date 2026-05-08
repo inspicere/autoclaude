@@ -13,6 +13,8 @@ python3 claude-approval-report.py              # full report to stdout
 python3 claude-approval-report.py --summary    # compact dashboard
 python3 claude-approval-report.py --why "git push"  # diagnose a specific command
 python3 claude-approval-report.py --apply --dry-run  # preview allowlist changes
+python3 claude-approval-report.py --apply --auto     # auto-apply read-only patterns (no prompt)
+python3 claude-approval-report.py --apply mutating --min-approvals 10  # mutating, 10+ approvals
 python3 claude-approval-report.py --json --since 7d --project laima  # filtered JSON
 python3 claude-approval-report.py --generate-settings  # deny rules + hook config
 python3 claude-approval-report.py --session current --summary  # latest session only

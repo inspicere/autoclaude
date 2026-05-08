@@ -918,10 +918,18 @@ def suggest_pattern_applicable(display):
         pattern = pattern.split(" or ")[1]
     if not re.match(r'^[\w]+(\(.*\))?$', pattern):
         return None
+    m = re.match(r'^Bash\((.+)\)$', pattern)
+    if m:
+        inner = m.group(1)
+        cmd_name = inner.split()[0] if inner.split() else ''
+        if cmd_name.startswith(('-', '(', '[')) or not cmd_name:
+            return None
+        if cmd_name in ('*', '**'):
+            return None
     return pattern
 
 
-def build_suggestions(all_records):
+def build_suggestions(all_records, min_approvals=3):
     """Build the list of allowlist suggestions from prompted records.
 
     Returns list of (count, project_name, display, pattern, risk) tuples.
@@ -939,9 +947,11 @@ def build_suggestions(all_records):
     skip_patterns = {"(comment/shebang)", "(empty)"}
     for project, counts in by_project.items():
         for cmd, count in counts.most_common():
-            if count >= 3:
+            if count >= min_approvals:
                 cmd_suffix = cmd.split(": ", 1)[1] if ": " in cmd else cmd
                 if cmd_suffix in skip_patterns:
+                    continue
+                if cmd_suffix.endswith(" [secrets]"):
                     continue
                 pattern = suggest_pattern(cmd)
                 risk = risk_by_key[(project, cmd)].most_common(1)[0][0]
@@ -981,13 +991,13 @@ def project_settings_path(project_name):
 MIN_PROJECTS_FOR_GLOBAL = 3
 
 
-def _collect_applicable(all_records, risk_level="read-only"):
+def _collect_applicable(all_records, risk_level="read-only", min_approvals=3):
     """Collect applicable suggestions grouped by project. Returns (by_project, pattern_projects).
 
     by_project: {project: [(pattern, count, risk), ...]}
     pattern_projects: {pattern: set of projects} — how many projects use each pattern
     """
-    suggestions = build_suggestions(all_records)
+    suggestions = build_suggestions(all_records, min_approvals=min_approvals)
 
     allowed_risks = {"read-only"}
     if risk_level == "mutating":
@@ -1030,14 +1040,14 @@ def _load_settings(path):
     return {}
 
 
-def apply_suggestions(all_records, risk_level="read-only", dry_run=False, scope="project", quiet=False):
+def apply_suggestions(all_records, risk_level="read-only", dry_run=False, scope="project", quiet=False, min_approvals=3):
     """Apply suggested allowlist patterns to settings files.
 
     scope: 'project' — per-project settings.local.json only (default)
            'global'  — patterns in 3+ projects go to ~/.claude/settings.json
            'both'    — global patterns to settings.json, remainder to settings.local.json
     """
-    by_project, pattern_projects = _collect_applicable(all_records, risk_level)
+    by_project, pattern_projects = _collect_applicable(all_records, risk_level, min_approvals=min_approvals)
 
     _log = (lambda *a, **kw: None) if quiet else (lambda *a, **kw: print(*a, file=sys.stderr, **kw))
 
@@ -1535,6 +1545,20 @@ def main():
         help="With --apply, show what would be added without writing.",
     )
     parser.add_argument(
+        "--auto",
+        action="store_true",
+        default=False,
+        help="With --apply, skip interactive confirmation. Only applies read-only patterns "
+             "regardless of --apply level. Use with --dry-run first to preview.",
+    )
+    parser.add_argument(
+        "--min-approvals",
+        type=int,
+        default=None,
+        metavar="N",
+        help="With --apply, only suggest patterns approved at least N times (default: 3).",
+    )
+    parser.add_argument(
         "--summary", "--brief",
         action="store_true",
         default=False,
@@ -1635,19 +1659,26 @@ def main():
         return
 
     if args.apply is not None:
-        if not args.dry_run and not sys.stdin.isatty():
-            print("Error: --apply requires an interactive terminal for confirmation.", file=sys.stderr)
-            print("Use --dry-run to preview changes, or run interactively.", file=sys.stderr)
-            sys.exit(1)
-        if not args.dry_run:
-            apply_suggestions(all_records, risk_level=args.apply, dry_run=True, scope=args.scope)
+        min_approvals = args.min_approvals if args.min_approvals is not None else 3
+        risk_level = args.apply
+        if args.auto:
+            risk_level = "read-only"
+        apply_kwargs = dict(risk_level=risk_level, scope=args.scope, min_approvals=min_approvals)
+        if args.dry_run:
+            apply_suggestions(all_records, dry_run=True, **apply_kwargs)
+        elif args.auto:
+            apply_suggestions(all_records, dry_run=False, **apply_kwargs)
+        else:
+            if not sys.stdin.isatty():
+                print("Error: --apply requires an interactive terminal or --auto.", file=sys.stderr)
+                print("Use --dry-run to preview, --auto to apply without confirmation.", file=sys.stderr)
+                sys.exit(1)
+            apply_suggestions(all_records, dry_run=True, **apply_kwargs)
             answer = input("\n  Apply these changes? [y/N] ").strip().lower()
             if answer != "y":
                 print("Aborted.", file=sys.stderr)
                 return
-            apply_suggestions(all_records, risk_level=args.apply, dry_run=False, scope=args.scope, quiet=True)
-        else:
-            apply_suggestions(all_records, risk_level=args.apply, dry_run=True, scope=args.scope)
+            apply_suggestions(all_records, dry_run=False, quiet=True, **apply_kwargs)
     else:
         if args.summary:
             renderer = render_summary
