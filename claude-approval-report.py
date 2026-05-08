@@ -1751,6 +1751,17 @@ def main():
     )
     args = parser.parse_args()
 
+    trend_window = args.trend if args.trend is not None else None
+    if trend_window and _is_duration(trend_window):
+        if args.since:
+            print(f"Warning: --trend {trend_window} overrides --since {args.since}",
+                  file=sys.stderr)
+        args.since = trend_window
+    elif trend_window and trend_window != "":
+        print(f"Error: invalid --trend window '{trend_window}'. "
+              f"Use a duration like 7d, 2w, 1m, 90d.", file=sys.stderr)
+        sys.exit(1)
+
     since = parse_time_filter(args.since) if args.since else None
 
     print("Scanning Claude Code session data...", file=sys.stderr)
@@ -1845,19 +1856,7 @@ def main():
                 return
             apply_suggestions(all_records, dry_run=False, quiet=True, **apply_kwargs)
     elif args.trend is not None:
-        trend_window = args.trend
-        if trend_window and _is_duration(trend_window):
-            trend_since = parse_time_filter(trend_window)
-            all_records = filter_records(all_records, since=trend_since)
-            if not active_filters:
-                print(f"Filters: since {trend_window}", file=sys.stderr)
-            window_days = _duration_to_days(trend_window)
-        else:
-            window_days = None
-            if trend_window and not _is_duration(trend_window):
-                print(f"Error: invalid --trend window '{trend_window}'. "
-                      f"Use a duration like 7d, 2w, 1m, 90d.", file=sys.stderr)
-                sys.exit(1)
+        window_days = _duration_to_days(args.trend) if args.trend else None
 
         if args.bucket:
             trend_bucket = args.bucket
