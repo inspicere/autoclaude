@@ -171,6 +171,26 @@ def main():
     results.append(ok)
     print(f"{'PASS' if ok else 'FAIL'} [ALLOW] mcp__ tool -> passthrough")
 
+    # === DEBUG MODE ===
+    print('\n=== Debug mode (HOOK_DEBUG=1) ===')
+
+    # Debug output appears on stderr when enabled
+    data = json.dumps({'tool_name': 'Bash', 'tool_input': {'command': 'ls -la'}})
+    env = dict(os.environ, HOOK_DEBUG='1')
+    r = subprocess.run(['python3', HOOK], input=data, capture_output=True, text=True, timeout=10, env=env)
+    ok = r.returncode == 0 and '[hook-debug]' in r.stderr
+    results.append(ok)
+    print(f"{'PASS' if ok else 'FAIL'} [ALLOW] HOOK_DEBUG=1 produces debug output on stderr")
+    if not ok:
+        print(f'       returncode={r.returncode}, stderr={r.stderr.strip()[:120]}')
+
+    # Debug output absent when disabled
+    data = json.dumps({'tool_name': 'Bash', 'tool_input': {'command': 'ls -la'}})
+    r = subprocess.run(['python3', HOOK], input=data, capture_output=True, text=True, timeout=10)
+    ok = r.returncode == 0 and '[hook-debug]' not in r.stderr
+    results.append(ok)
+    print(f"{'PASS' if ok else 'FAIL'} [ALLOW] HOOK_DEBUG unset produces no debug output")
+
     print()
     passed = sum(results)
     total = len(results)

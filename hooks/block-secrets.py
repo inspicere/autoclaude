@@ -22,6 +22,13 @@ import os
 import re
 import sys
 
+_DEBUG = os.environ.get("HOOK_DEBUG", "") == "1"
+
+
+def _debug(msg):
+    if _DEBUG:
+        print(f"[hook-debug] {msg}", file=sys.stderr)
+
 
 # --- Token patterns (same as claude-approval-report.py) ---
 
@@ -245,8 +252,12 @@ def _is_sensitive_path(path):
     if path.endswith('.pub'):
         return False
     if _could_glob_match_sensitive(path):
+        _debug(f"sensitive path (glob match): {path}")
         return True
-    return bool(_SENSITIVE_PATH_RE.search(path))
+    matched = bool(_SENSITIVE_PATH_RE.search(path))
+    if matched:
+        _debug(f"sensitive path (regex match): {path}")
+    return matched
 
 
 def _check_command_secrets(command):
@@ -284,7 +295,9 @@ def _check_command_secrets(command):
             if clean.startswith(('/', '.', '~', '-', '$', '{', '(')):
                 continue
             if len(clean) >= 32 and _RE_HIGH_ENTROPY.match(clean):
-                if _shannon_entropy(clean) >= 3.5:
+                entropy = _shannon_entropy(clean)
+                _debug(f"entropy check: len={len(clean)} score={entropy:.2f}")
+                if entropy >= 3.5:
                     return "Command contains a high-entropy string (possible secret)"
 
     return None
@@ -795,6 +808,7 @@ _REMEDIATION_HINTS = (
 
 
 def block(reason):
+    _debug(f"decision: BLOCK — {reason[:80]}")
     hint = ""
     reason_lower = reason.lower()
     for pattern, h in _REMEDIATION_HINTS:
@@ -831,17 +845,22 @@ def main():
 
     tool_name = data.get("tool_name", "")
     tool_input = data.get("tool_input", {})
+    _debug(f"tool_name={tool_name}")
 
     if tool_name in _PASSTHROUGH_TOOLS or tool_name.startswith("mcp__"):
+        _debug(f"passthrough: {tool_name}")
         sys.exit(0)
 
     if tool_name not in _SCANNABLE_TOOLS:
+        _debug(f"unknown tool blocked: {tool_name}")
         block(f"BLOCKED: Unknown tool type '{tool_name}' (fail-closed)")
 
     if tool_name == "Bash":
         command = tool_input.get("command", "")
         if not command:
+            _debug("Bash: empty command, allowing")
             sys.exit(0)
+        _debug(f"Bash command ({len(command)} chars)")
 
         sub_cmds = _split_shell_commands(command)
         for m in _RE_COMMAND_SUBST.finditer(command):
@@ -883,10 +902,12 @@ def main():
                 if base not in _GREP_FAMILY:
                     reason = _check_command_secrets(sub_cmd)
                     if reason:
+                        _debug(f"secret match: {reason.split(':')[0] if ':' in reason else 'unknown category'}")
                         block(f"BLOCKED: {reason}")
 
             reason = _check_single_command_access(sub_cmd)
             if reason:
+                _debug(f"access check hit: {reason[:60]}")
                 block(f"BLOCKED: {reason}")
 
             # Check for while-read-loop sentinel inserted by _split_shell_commands
@@ -915,6 +936,7 @@ def main():
 
     elif tool_name in ("Read", "Edit", "Write"):
         file_path = tool_input.get("file_path", "")
+        _debug(f"{tool_name} file_path={file_path}")
         if file_path:
             reason = _check_file_path(file_path)
             if reason:
@@ -945,6 +967,7 @@ def main():
                     if reason:
                         block(f"BLOCKED: Written content contains: {reason}")
 
+    _debug("decision: ALLOW")
     sys.exit(0)
 
 
