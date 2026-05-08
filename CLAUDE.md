@@ -17,9 +17,11 @@ python3 claude-approval-report.py --apply --auto     # auto-apply read-only patt
 python3 claude-approval-report.py --apply mutating --min-approvals 10  # mutating, 10+ approvals
 python3 claude-approval-report.py --json --since 7d --project laima  # filtered JSON
 python3 claude-approval-report.py --generate-settings  # deny rules + hook config
-python3 claude-approval-report.py --trend              # daily approval rate trend
-python3 claude-approval-report.py --trend week         # weekly trend buckets
-python3 claude-approval-report.py --trend month --since 30d  # monthly, last 30 days
+python3 claude-approval-report.py --trend              # daily trend, all time
+python3 claude-approval-report.py --trend 7d           # daily trend, last 7 days
+python3 claude-approval-report.py --trend 90d          # auto-picks weekly buckets
+python3 claude-approval-report.py --trend 30d --bucket week  # override auto bucket
+python3 claude-approval-report.py --trend --bucket quarter   # quarterly, all time
 python3 claude-approval-report.py --session current --summary  # latest session only
 python3 claude-approval-report.py -o           # write to auto-named timestamped file
 ```
