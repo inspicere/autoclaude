@@ -67,6 +67,31 @@ Weekly cron job that runs `vault token renew` to extend the terrabot CLI token. 
 
 Reference these docs when adding new secret patterns or modifying detection logic to ensure the documented workarounds remain valid.
 
+## Known Issues (from 2026-05-08 red team engagement) — MOSTLY FIXED
+
+A multi-agent red team engagement on 2026-05-08 (5 parallel agents, mix of Opus and Sonnet models) targeted the hooks with a planted fake secret in `~/autoclaude_engagement_target/.env`. The hooks blocked all direct access vectors but **7 distinct bypass classes with 30+ working vectors** were identified. The engagement agents implemented fixes for most bypass classes directly in `hooks/block-secrets.py` (67 new tests, all passing, zero regressions on existing 48+12 test suites).
+
+### Critical (2) — FIXED
+1. ~~**Quoted path bypass**~~ — `_strip_quotes()` added to `_is_sensitive_path()` to remove quotes before matching.
+2. ~~**Glob/wildcard bypass**~~ — `_could_glob_match_sensitive()` uses `fnmatch` to detect globs that could expand to sensitive filenames.
+
+### High (4) — FIXED
+3. ~~**15+ unmonitored file-reading tools**~~ — Added `sort`, `paste`, `cut`, `fmt`, `fold`, `expand`, `pr`, `column`, `jq`, `diff`, `cmp`, `comm`, `csplit`, `split`, `join`, `uniq`, `iconv`, `yq`, `xq`, `script` to `_FILE_READERS`.
+4. ~~**Process substitution `<()` not parsed**~~ — Added `_RE_PROC_SUBST` regex, extracted commands checked alongside `$()`.
+5. ~~**Write-then-execute**~~ — Write/Edit tool content now scanned for file-reading/copying commands targeting sensitive paths.
+6. ~~**Heredoc-to-interpreter**~~ — `_RE_HEREDOC` detects heredoc syntax; body scanned via `_check_sensitive_paths_in_text()` when interpreter is the base command.
+
+### Medium (2) — PARTIALLY FIXED
+7. **Variable/runtime indirection** — `xargs` with file-reading commands now blocked. Shell variable expansion (`F=.env && cat "$F"`) and `find -exec` remain undetectable (fundamental limitation of static analysis).
+8. ~~**curl `@file` exfiltration**~~ — Added `@file`, `=@file`, `-T`/`--upload-file`, and `wget --post-file`/`--body-file` detection.
+
+### Additional fixes in same changeset
+- `command` and `busybox` added to `_COMMAND_WRAPPERS`
+- `script -c` wrapper detection added
+- Interpreter script file arguments checked against `_is_sensitive_path`
+- `bash -c` inner commands now split and checked individually
+- `make` with sensitive file arguments detected
+
 ## Known Issues (from 2026-05-07 adversarial audit) — ALL RESOLVED
 
 A comprehensive adversarial audit on 2026-05-07 identified 32 bypass vectors and 22 code quality issues. All findings were remediated same-day in commits `275ee75` (hooks), `7f271f4` (main script), `20bdfb1` (docs). Test suites added: `test_block_secrets.py` (48 tests), `test_warn_secrets.py` (12 tests).
