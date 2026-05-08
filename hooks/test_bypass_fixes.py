@@ -118,6 +118,54 @@ test_hook('Bash', {'command': 'ls -la /home/terrabot'}, False, 'ls (always safe)
 test_hook('Bash', {'command': 'git status'}, False, 'git status')
 test_hook('Bash', {'command': 'python3 /tmp/script.py --help'}, False, 'python3 with flag arg')
 
+print("\n=== ROUND 2 FIX 1: Missing content-reading tools ===")
+for tool in ['shuf', 'unexpand', 'colrm', 'look', 'tsort', 'ptx', 'nkf',
+             'uuencode', 'base32', 'zcat', 'bzcat', 'xzcat', 'lz4', 'vidir']:
+    test_hook('Bash', {'command': tool + ' ' + S}, True, tool + ' .env')
+test_hook('Bash', {'command': 'lz4 -d -c ' + S}, True, 'lz4 -d -c .env')
+test_hook('Bash', {'command': 'uuencode ' + S + ' output.uue'}, True, 'uuencode .env output.uue')
+
+print("\n=== ROUND 2 FIX 2: openssl -in flag ===")
+test_hook('Bash', {'command': 'openssl base64 -in ' + S}, True, 'openssl base64 -in .env')
+test_hook('Bash', {'command': 'openssl enc -d -base64 -in ' + S}, True, 'openssl enc -in .env')
+test_hook('Bash', {'command': 'openssl base64 -in /tmp/safe.txt'}, False, 'openssl -in safe file')
+
+print("\n=== ROUND 2 FIX 3: --long-flag= bypass in _FILE_READERS ===")
+test_hook('Bash', {'command': 'diff --from-file=' + S + ' /dev/null'}, True, 'diff --from-file=.env')
+test_hook('Bash', {'command': 'diff --old-file=' + S + ' /dev/null'}, True, 'diff --old-file=.env')
+test_hook('Bash', {'command': 'diff --new-file=' + S + ' /dev/null'}, True, 'diff --new-file=.env')
+test_hook('Bash', {'command': 'sort --files0-from=' + S}, True, 'sort --files0-from=.env')
+test_hook('Bash', {'command': 'diff --from-file=/tmp/safe.txt /dev/null'}, False, 'diff --from-file safe')
+
+print("\n=== ROUND 2 FIX 4: Brace grouping { } and subshell () ===")
+test_hook('Bash', {'command': '{ cat ' + S + '; }'}, True, 'brace group cat .env')
+test_hook('Bash', {'command': '(cat ' + S + ')'}, True, 'subshell cat .env')
+test_hook('Bash', {'command': '(head ' + S + '; echo done)'}, True, 'subshell head .env')
+test_hook('Bash', {'command': '{ echo hello; }'}, False, 'brace group safe')
+test_hook('Bash', {'command': '(echo hello)'}, False, 'subshell safe')
+
+print("\n=== ROUND 2 FIX 5: Variable indirection F=path; cat $F ===")
+test_hook('Bash', {'command': 'F=' + S + '; cat $F'}, True, 'var assign then cat $F')
+test_hook('Bash', {'command': 'TFILE=' + S + '; head $TFILE'}, True, 'var assign then head $TFILE')
+test_hook('Bash', {'command': 'export TFILE=' + S + '; cat $TFILE'}, True, 'export var then cat $TFILE')
+test_hook('Bash', {'command': 'F=' + S + '; eval cat $F'}, True, 'var assign then eval cat $F')
+test_hook('Bash', {'command': 'F=/tmp/safe.txt; cat $F'}, False, 'var assign safe file')
+
+print("\n=== ROUND 2 FIX 6: bash -c 'F=path; cat $F' variable indirection ===")
+test_hook('Bash', {'command': "bash -c 'F=" + S + "; cat $F'"}, True, 'bash -c var+cat')
+test_hook('Bash', {'command': "bash -c 'F=" + S + "; head $F'"}, True, 'bash -c var+head')
+test_hook('Bash', {'command': "bash -c 'F=/tmp/safe; cat $F'"}, False, 'bash -c var safe')
+
+print("\n=== ROUND 2 FIX 7: echo/printf | sh/bash pipe injection ===")
+test_hook('Bash', {'command': "echo 'cat " + S + "' | bash"}, True, 'echo cmd | bash')
+test_hook('Bash', {'command': "printf 'cat " + S + "' | sh"}, True, 'printf cmd | sh')
+test_hook('Bash', {'command': "echo 'head " + S + "' | bash"}, True, 'echo head cmd | bash')
+test_hook('Bash', {'command': "echo 'echo hello' | bash"}, False, 'echo safe | bash')
+
+print("\n=== ROUND 2 FIX 8: while read VAR loop via pipe ===")
+test_hook('Bash', {'command': 'echo ' + S + ' | while read f; do cat "$f"; done'}, True, 'while read cat loop')
+test_hook('Bash', {'command': 'echo /tmp/safe.txt | while read f; do cat "$f"; done'}, False, 'while read safe')
+
 print(f"\n{'='*60}")
 print(f"Results: {results['pass']} passed, {results['fail']} failed")
 if results['fail'] > 0:
