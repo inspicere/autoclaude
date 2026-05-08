@@ -19,7 +19,7 @@ python3 claude-approval-report.py --session current --summary  # latest session 
 python3 claude-approval-report.py -o           # write to auto-named timestamped file
 ```
 
-No dependencies beyond Python 3.8+ stdlib. No test suite — verify changes by running the script against live session data in `~/.claude/projects/`.
+No dependencies beyond Python 3.8+ stdlib. The main script has no test suite — verify changes by running against live session data in `~/.claude/projects/`. The hooks have comprehensive test suites: `test_block_secrets.py` (48 tests), `test_bypass_fixes.py` (67 tests), `test_round2_bypass_fixes.py` (50 tests), `test_warn_secrets.py` (12 tests) — 177 total.
 
 ## Architecture
 
@@ -45,7 +45,7 @@ A self-contained Python hook (no imports from the main script) that blocks tool 
 The hook covers gaps that deny rules cannot:
 1. Secrets embedded in Bash commands (`VAULT_TOKEN=hvs.xxx vault kv get`)
 2. Sensitive file reads via Bash (`cat .env`) that bypass Read tool deny rules
-3. Bypass vectors: subshell wrapping (`bash -c`), `eval`, interpreter file I/O (`python3 -c "open('.env')"`), file copy/move/link (`cp .env /tmp/x`), `dd if=`, stdin redirection (`< .env`)
+3. Bypass vectors: subshell wrapping (`bash -c`), `eval`, interpreter file I/O (`python3 -c "open('.env')"`), file copy/move/link (`cp .env /tmp/x`), `dd if=`, stdin redirection (`< .env`), process substitution (`<()`), heredoc-to-interpreter, backtick substitution, pipe-to-shell (`echo cmd | bash`), subshell/brace grouping (`(cmd)`, `{ cmd; }`), variable assignment tracking, SSH remote commands, `xargs -a`/`--arg-file`, long-form file flags (`--from-file=`, `--files0-from=`), 45+ file-reading tools
 
 ## PostToolUse hook (`hooks/warn-secrets-output.py`)
 
@@ -67,30 +67,61 @@ Weekly cron job that runs `vault token renew` to extend the terrabot CLI token. 
 
 Reference these docs when adding new secret patterns or modifying detection logic to ensure the documented workarounds remain valid.
 
-## Known Issues (from 2026-05-08 red team engagement) — MOSTLY FIXED
+## Known Issues (from 2026-05-08 red team engagement) — ALL FIXABLE ISSUES RESOLVED
 
-A multi-agent red team engagement on 2026-05-08 (5 parallel agents, mix of Opus and Sonnet models) targeted the hooks with a planted fake secret in `~/autoclaude_engagement_target/.env`. The hooks blocked all direct access vectors but **7 distinct bypass classes with 30+ working vectors** were identified. The engagement agents implemented fixes for most bypass classes directly in `hooks/block-secrets.py` (67 new tests, all passing, zero regressions on existing 48+12 test suites).
+A two-round multi-agent red team engagement on 2026-05-08 targeted the hooks with a planted fake secret in `~/autoclaude_engagement_target/.env`. Round 1: 5 parallel agents (Opus + Sonnet) found 7 bypass classes with 30+ working vectors. Round 2: 5 more agents targeted the hardened hook and found 15 additional bypass classes. All fixable issues were remediated. 117 tests total (67 round 1 + 50 round 2), 0 failures. Hook grew from ~504 to ~830 lines.
 
-### Critical (2) — FIXED
+### Round 1 (commit `5856065`) — ALL FIXED
+
+#### Critical (2)
 1. ~~**Quoted path bypass**~~ — `_strip_quotes()` added to `_is_sensitive_path()` to remove quotes before matching.
 2. ~~**Glob/wildcard bypass**~~ — `_could_glob_match_sensitive()` uses `fnmatch` to detect globs that could expand to sensitive filenames.
 
-### High (4) — FIXED
+#### High (4)
 3. ~~**15+ unmonitored file-reading tools**~~ — Added `sort`, `paste`, `cut`, `fmt`, `fold`, `expand`, `pr`, `column`, `jq`, `diff`, `cmp`, `comm`, `csplit`, `split`, `join`, `uniq`, `iconv`, `yq`, `xq`, `script` to `_FILE_READERS`.
 4. ~~**Process substitution `<()` not parsed**~~ — Added `_RE_PROC_SUBST` regex, extracted commands checked alongside `$()`.
 5. ~~**Write-then-execute**~~ — Write/Edit tool content now scanned for file-reading/copying commands targeting sensitive paths.
 6. ~~**Heredoc-to-interpreter**~~ — `_RE_HEREDOC` detects heredoc syntax; body scanned via `_check_sensitive_paths_in_text()` when interpreter is the base command.
 
-### Medium (2) — PARTIALLY FIXED
-7. **Variable/runtime indirection** — `xargs` with file-reading commands now blocked. Shell variable expansion (`F=.env && cat "$F"`) and `find -exec` remain undetectable (fundamental limitation of static analysis).
-8. ~~**curl `@file` exfiltration**~~ — Added `@file`, `=@file`, `-T`/`--upload-file`, and `wget --post-file`/`--body-file` detection.
+#### Medium (2)
+7. ~~**curl `@file` exfiltration**~~ — Added `@file`, `=@file`, `-T`/`--upload-file`, and `wget --post-file`/`--body-file` detection.
+8. **Variable/runtime indirection** — `xargs` with file-reading commands blocked (round 1). Variable assignment tracking added in round 2 (see below). Shell function indirection and bash array expansion remain undetectable.
 
-### Additional fixes in same changeset
+#### Additional round 1 fixes
 - `command` and `busybox` added to `_COMMAND_WRAPPERS`
 - `script -c` wrapper detection added
 - Interpreter script file arguments checked against `_is_sensitive_path`
 - `bash -c` inner commands now split and checked individually
 - `make` with sensitive file arguments detected
+
+### Round 2 (commit `074615f`) — ALL FIXABLE ISSUES RESOLVED
+
+#### Critical (1)
+9. ~~**bash/sh/zsh heredoc**~~ — shells weren't in `_INTERPRETERS` for heredoc check. Added `_HEREDOC_SHELLS` set.
+
+#### High (8)
+10. ~~**Backtick substitution**~~ — no regex existed for `` `cmd` ``. Added `_RE_BACKTICK_SUBST`.
+11. ~~**stdbuf/ionice/numactl/taskset/chrt wrappers**~~ — not in `_COMMAND_WRAPPERS`. Added with proper flag stripping.
+12. ~~**xargs -a/--arg-file**~~ — xargs handler only checked command target. Added arg-file flag detection.
+13. ~~**bash -c positional args**~~ — `bash -c 'cat "$1"' _ .env` positional args after `-c` string not checked. Added shell positional arg scanning.
+14. ~~**Subshell `(cmd)` unwrapping**~~ — bare `(...)` not parsed. Added `_unwrap_grouping()` with `&` trailing strip.
+15. ~~**Curly-brace `{ cmd; }` grouping**~~ — `{` as first token not handled. Added to `_unwrap_grouping()`.
+16. ~~**Variable indirection tracking**~~ — `F=.env; cat $F` not followed. Added `_RE_VAR_ASSIGN` variable assignment tracking in `main()`.
+17. ~~**echo|bash pipe injection**~~ — `echo cmd | bash` not detected. Added post-processing in `_split_shell_commands`.
+
+#### Medium (6)
+18. ~~**node --eval long-form interpreter flags**~~ — only `-c`/`-e`/`-r` checked. Added `--eval`, `--exec`, `--print`, `--require`, `--command`.
+19. ~~**SSH remote command execution**~~ — ssh not in any detection list. Added SSH remote command arg scanning.
+20. ~~**while-read loop tracking**~~ — loop variable flow not tracked. Added `SENSITIVE_VAR_LOOP:` sentinel.
+21. ~~**--from-file=/--files0-from= long flags**~~ — `_LONG_FILE_FLAGS` set added.
+22. ~~**openssl -in flag scanning**~~ — `_FILE_FLAG_ARGS` dict added.
+23. ~~**14 additional file readers**~~ — shuf, unexpand, colrm, look, tsort, ptx, nkf, uuencode, base32, zcat, bzcat, xzcat, lz4, vidir added to `_FILE_READERS`.
+
+### Remaining architectural gaps (unfixable by static analysis)
+- **Shell function indirection**: `r() { cat "$1"; }; r .env` — function definitions create opaque indirection
+- **Bash array expansion**: `a=(cat .env); "${a[@]}"` — array content not trackable
+- **Runtime path construction**: `os.listdir()` in scripts — no .env reference in args
+- **Generic write-then-execute**: script content has no sensitive path reference
 
 ## Known Issues (from 2026-05-07 adversarial audit) — ALL RESOLVED
 
