@@ -111,6 +111,48 @@ def main():
     results.append(bash('grep PASSWORD /tmp/config.txt', False))
     results.append(bash('vault kv get secret/db', False))
 
+    # === FAIL-CLOSED: Error handling ===
+    print('\n=== Fail-closed error handling ===')
+
+    # Empty stdin
+    r = subprocess.run(['python3', HOOK], input='', capture_output=True, text=True, timeout=10)
+    ok = r.returncode == 2
+    results.append(ok)
+    print(f"{'PASS' if ok else 'FAIL'} [BLOCK] empty stdin -> fail-closed")
+
+    # Invalid JSON
+    r = subprocess.run(['python3', HOOK], input='not json{{{', capture_output=True, text=True, timeout=10)
+    ok = r.returncode == 2
+    results.append(ok)
+    print(f"{'PASS' if ok else 'FAIL'} [BLOCK] invalid JSON -> fail-closed")
+
+    # Non-dict JSON (array)
+    r = subprocess.run(['python3', HOOK], input='[1,2,3]', capture_output=True, text=True, timeout=10)
+    ok = r.returncode == 2
+    results.append(ok)
+    print(f"{'PASS' if ok else 'FAIL'} [BLOCK] non-dict JSON -> fail-closed")
+
+    # Unknown tool type
+    data = json.dumps({'tool_name': 'FooBarUnknown', 'tool_input': {}})
+    r = subprocess.run(['python3', HOOK], input=data, capture_output=True, text=True, timeout=10)
+    ok = r.returncode == 2
+    results.append(ok)
+    print(f"{'PASS' if ok else 'FAIL'} [BLOCK] unknown tool type -> fail-closed")
+
+    # Known passthrough tool (Agent)
+    data = json.dumps({'tool_name': 'Agent', 'tool_input': {}})
+    r = subprocess.run(['python3', HOOK], input=data, capture_output=True, text=True, timeout=10)
+    ok = r.returncode == 0
+    results.append(ok)
+    print(f"{'PASS' if ok else 'FAIL'} [ALLOW] Agent -> passthrough")
+
+    # MCP tool
+    data = json.dumps({'tool_name': 'mcp__vault__vault_read', 'tool_input': {}})
+    r = subprocess.run(['python3', HOOK], input=data, capture_output=True, text=True, timeout=10)
+    ok = r.returncode == 0
+    results.append(ok)
+    print(f"{'PASS' if ok else 'FAIL'} [ALLOW] mcp__ tool -> passthrough")
+
     print()
     passed = sum(results)
     total = len(results)

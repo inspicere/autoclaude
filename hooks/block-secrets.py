@@ -782,16 +782,38 @@ def block(reason):
     sys.exit(2)
 
 
+_SCANNABLE_TOOLS = frozenset({"Bash", "Read", "Edit", "Write"})
+
+_PASSTHROUGH_TOOLS = frozenset({
+    "Agent", "WebFetch", "WebSearch", "Glob", "Grep",
+    "Skill", "ToolSearch", "AskUserQuestion",
+    "EnterPlanMode", "ExitPlanMode", "EnterWorktree", "ExitWorktree",
+    "TaskCreate", "TaskUpdate", "TaskList", "TaskGet", "TaskStop", "TaskOutput",
+    "NotebookEdit", "CronCreate", "CronDelete", "CronList",
+    "ScheduleWakeup", "SendMessage",
+    "ListMcpResourcesTool", "ReadMcpResourceTool",
+})
+
+
 def main():
     try:
-        data = json.load(sys.stdin)
+        raw = sys.stdin.read()
+        if not raw.strip():
+            block("BLOCKED: Empty input to hook (fail-closed)")
+        data = json.loads(raw)
         if not isinstance(data, dict):
-            sys.exit(0)
-    except (json.JSONDecodeError, EOFError, ValueError):
-        sys.exit(0)
+            block("BLOCKED: Invalid hook input — expected JSON object (fail-closed)")
+    except (json.JSONDecodeError, EOFError, ValueError) as e:
+        block(f"BLOCKED: Malformed hook input (fail-closed): {e}")
 
     tool_name = data.get("tool_name", "")
     tool_input = data.get("tool_input", {})
+
+    if tool_name in _PASSTHROUGH_TOOLS or tool_name.startswith("mcp__"):
+        sys.exit(0)
+
+    if tool_name not in _SCANNABLE_TOOLS:
+        block(f"BLOCKED: Unknown tool type '{tool_name}' (fail-closed)")
 
     if tool_name == "Bash":
         command = tool_input.get("command", "")
