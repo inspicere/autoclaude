@@ -1131,6 +1131,11 @@ def apply_suggestions(all_records, risk_level="read-only", dry_run=False, scope=
 
 # --- Main ---
 
+def _is_duration(value):
+    """Return True if *value* looks like a relative duration (7d, 2w, 1m)."""
+    return bool(re.match(r'^\d+[dwm]$', value))
+
+
 def parse_time_filter(value):
     """Parse --since value. Accepts ISO date (2026-05-01) or relative (7d, 2w, 1m)."""
     # Relative: 7d, 2w, 1m
@@ -1156,6 +1161,35 @@ def parse_time_filter(value):
     except ValueError:
         print(f"Error: invalid time filter '{value}'. Use ISO date (2026-05-01) or relative (7d, 2w, 1m).")
         sys.exit(1)
+
+
+def _duration_to_days(value):
+    """Convert a duration string to approximate number of days."""
+    m = re.match(r'^(\d+)([dwm])$', value)
+    if not m:
+        return None
+    num = int(m.group(1))
+    unit = m.group(2)
+    if unit == "d":
+        return num
+    elif unit == "w":
+        return num * 7
+    elif unit == "m":
+        return num * 30
+    return None
+
+
+def _auto_bucket(days):
+    """Pick a sensible bucket size for a given window in days."""
+    if days <= 31:
+        return "day"
+    if days <= 90:
+        return "week"
+    if days <= 730:
+        return "month"
+    if days <= 1825:
+        return "quarter"
+    return "year"
 
 
 def _parse_ts(ts):
@@ -1281,6 +1315,11 @@ def render_trend(all_records, bucket="day", out=None):
             return monday.strftime("%Y-%m-%d")
         elif bucket == "month":
             return dt.strftime("%Y-%m")
+        elif bucket == "quarter":
+            q = (dt.month - 1) // 3 + 1
+            return f"{dt.year}-Q{q}"
+        elif bucket == "year":
+            return dt.strftime("%Y")
         return dt.strftime("%Y-%m-%d")
 
     buckets = defaultdict(lambda: {"total": 0, "auto": 0, "prompted": 0, "rejected": 0,
@@ -1312,7 +1351,13 @@ def render_trend(all_records, bucket="day", out=None):
 
     sorted_keys = sorted(buckets.keys())
 
-    label = {"day": "Day", "week": "Week of", "month": "Month"}.get(bucket, "Period")
+    if len(sorted_keys) > 100:
+        print(f"Warning: {len(sorted_keys)} rows of trend data. "
+              f"Consider a larger bucket (--bucket week/month/quarter/year) "
+              f"or narrower window (--trend 30d).", file=sys.stderr)
+
+    label = {"day": "Day", "week": "Week of", "month": "Month",
+             "quarter": "Quarter", "year": "Year"}.get(bucket, "Period")
     hdr = f"  {label:<12} {'Total':>7} {'Auto':>7} {'Prompted':>10} {'Rej':>4} {'Auto%':>6} {'Destr':>6} {'Mutat':>7} {'R/O':>7} {'Sec':>4}"
     sep = f"  {'-'*12} {'-'*7} {'-'*7} {'-'*10} {'-'*4} {'-'*6} {'-'*7} {'-'*7} {'-'*7} {'-'*4}"
     _print(f"CLAUDE CODE TREND ANALYSIS (by {bucket})")
@@ -1672,10 +1717,17 @@ def main():
     parser.add_argument(
         "--trend",
         nargs="?",
-        const="day",
+        const="",
         default=None,
-        choices=["day", "week", "month"],
-        help="Show approval rate trends over time. Bucket by day (default), week, or month.",
+        metavar="WINDOW",
+        help="Show approval rate trends. Optional time window (7d, 2w, 1m, 90d) "
+             "auto-selects bucket size. Use --bucket to override.",
+    )
+    parser.add_argument(
+        "--bucket",
+        default=None,
+        choices=["day", "week", "month", "quarter", "year"],
+        help="Bucket size for --trend. Auto-selected from window if omitted.",
     )
     parser.add_argument(
         "--why",
@@ -1793,8 +1845,29 @@ def main():
                 return
             apply_suggestions(all_records, dry_run=False, quiet=True, **apply_kwargs)
     elif args.trend is not None:
+        trend_window = args.trend
+        if trend_window and _is_duration(trend_window):
+            trend_since = parse_time_filter(trend_window)
+            all_records = filter_records(all_records, since=trend_since)
+            if not active_filters:
+                print(f"Filters: since {trend_window}", file=sys.stderr)
+            window_days = _duration_to_days(trend_window)
+        else:
+            window_days = None
+            if trend_window and not _is_duration(trend_window):
+                print(f"Error: invalid --trend window '{trend_window}'. "
+                      f"Use a duration like 7d, 2w, 1m, 90d.", file=sys.stderr)
+                sys.exit(1)
+
+        if args.bucket:
+            trend_bucket = args.bucket
+        elif window_days:
+            trend_bucket = _auto_bucket(window_days)
+        else:
+            trend_bucket = "day"
+
         if args.output is None:
-            render_trend(all_records, bucket=args.trend)
+            render_trend(all_records, bucket=trend_bucket)
         else:
             if args.output == "auto":
                 out_path = f"claude-trend-{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H%M%SZ')}.txt"
@@ -1803,7 +1876,7 @@ def main():
             else:
                 out_path = args.output
             with open(out_path, "w") as f:
-                render_trend(all_records, bucket=args.trend, out=f)
+                render_trend(all_records, bucket=trend_bucket, out=f)
             print(f"Trend written to {out_path}", file=sys.stderr)
     else:
         if args.summary:
