@@ -74,6 +74,13 @@ _RE_SECRET_ASSIGN = re.compile(
 
 _RE_HIGH_ENTROPY = re.compile(r'^[A-Za-z0-9+/=]+$')
 
+_SAFE_PLACEHOLDERS = frozenset({
+    'changeme', 'password', 'placeholder', 'example',
+    'your-token-here', 'your_token_here', 'replace-me',
+    'xxxxxxxx', 'test1234', 'password123', 'true', 'false',
+    'none', 'null',
+})
+
 _GREP_FAMILY = frozenset({
     'grep', 'egrep', 'fgrep', 'rg', 'ag', 'ack', 'find', 'sed', 'awk',
 })
@@ -122,6 +129,9 @@ _FILE_READERS = frozenset({
 # Maps command name -> set of flags whose next argument is a file path
 _FILE_FLAG_ARGS = {
     'openssl': {'-in', '-inkey', '-certfile', '-CAfile'},
+    'ansible-vault': {'--vault-password-file', '--vault-pass-file'},
+    'ansible-playbook': {'--vault-password-file', '--vault-pass-file'},
+    'ansible': {'--vault-password-file', '--vault-pass-file'},
 }
 
 # Long-option prefixes whose value (after '=') is a file path, for _FILE_READERS members
@@ -251,7 +261,7 @@ def _check_command_secrets(command):
         auth_val = re.search(r'\b(?:Bearer|Token)\s+(\S+)', command, re.IGNORECASE)
         if auth_val:
             val = auth_val.group(1).strip("\"'")
-            if not val.startswith('$'):
+            if not val.startswith('$') and val.lower() not in _SAFE_PLACEHOLDERS:
                 return "Command contains an Authorization header with credentials"
         else:
             return "Command contains an Authorization header with credentials"
@@ -261,12 +271,7 @@ def _check_command_secrets(command):
         val = m.group(2).strip("\"'")
         if (len(val) > 8
                 and not val.startswith(('$', '{', 'http://', 'https://', '/'))
-                and val.lower() not in (
-                    'changeme', 'password', 'placeholder', 'example',
-                    'your-token-here', 'your_token_here', 'replace-me',
-                    'xxxxxxxx', 'test1234', 'password123', 'true', 'false',
-                    'none', 'null',
-                )):
+                and val.lower() not in _SAFE_PLACEHOLDERS):
             return f"Command assigns a value to secret variable {m.group(1)}"
 
     parts = command.split()
