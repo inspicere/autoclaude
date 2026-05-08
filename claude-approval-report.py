@@ -222,6 +222,30 @@ GIT_READ_ONLY_SUBCMDS = {
 }
 
 
+def _cmd_has_secrets(raw_cmd):
+    """Check if a raw Bash command contains secret material."""
+    if _has_secret_token(raw_cmd):
+        return True
+    if _RE_CURL_AUTH.search(raw_cmd):
+        return True
+    m = _RE_SECRET_ASSIGN.search(raw_cmd)
+    if m:
+        val = m.group(2).strip("\"'")
+        if (len(val) > 8
+                and not val.startswith(('$', '{', 'http://', 'https://', '/'))
+                and val.lower() not in (
+                    'changeme', 'password', 'placeholder', 'example',
+                    'your-token-here', 'your_token_here', 'replace-me',
+                    'xxxxxxxx', 'test1234', 'password123', 'true', 'false',
+                    'none', 'null',
+                )):
+            return True
+    parts = raw_cmd.split()
+    if len(parts) > 1 and _has_high_entropy_blob(parts[1:]):
+        return True
+    return False
+
+
 def classify_risk(tool_name, tool_input):
     """Classify a tool call as destructive/mutating/read-only."""
     if tool_name == "Bash":
@@ -237,27 +261,8 @@ def classify_risk(tool_name, tool_input):
         # Strip trailing punctuation from parsing artifacts
         base = base.rstrip('"\')}')
 
-        # Detect secret/key material exposure — scan the full original command
-        # so env-var prefixes like VAULT_TOKEN=hvs.xxx aren't missed
         if base not in ("grep", "egrep", "fgrep", "rg", "ag", "ack", "find", "sed", "awk"):
-            if _has_secret_token(raw_cmd):
-                return "destructive"
-            if _RE_CURL_AUTH.search(raw_cmd):
-                return "destructive"
-            m = _RE_SECRET_ASSIGN.search(raw_cmd)
-            if m:
-                val = m.group(2).strip("\"'")
-                if (len(val) > 8
-                        and not val.startswith(('$', '{', 'http://', 'https://', '/'))
-                        and val.lower() not in (
-                            'changeme', 'password', 'placeholder', 'example',
-                            'your-token-here', 'your_token_here', 'replace-me',
-                            'xxxxxxxx', 'test1234', 'password123', 'true', 'false',
-                            'none', 'null',
-                        )):
-                    return "destructive"
-            raw_parts = raw_cmd.split()
-            if len(raw_parts) > 1 and _has_high_entropy_blob(raw_parts[1:]):
+            if _cmd_has_secrets(raw_cmd):
                 return "destructive"
 
         # Git subcommand-aware classification
@@ -514,7 +519,12 @@ def get_tool_display(tool_name, tool_input):
     """Get a human-readable description of a tool call."""
     if tool_name == "Bash":
         cmd = tool_input.get("command", "")
-        return f"Bash: {normalize_command(cmd)}"
+        name = normalize_command(cmd)
+        base = cmd.split()[0] if cmd.split() else ""
+        if base not in ("grep", "egrep", "fgrep", "rg", "ag", "ack", "find", "sed", "awk"):
+            if _cmd_has_secrets(cmd):
+                name += " [secrets]"
+        return f"Bash: {name}"
     elif tool_name in ("Read", "Write", "Edit"):
         fp = tool_input.get("file_path", "")
         return f"{tool_name}: {shorten_path(fp)}"
