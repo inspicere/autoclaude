@@ -159,6 +159,27 @@ python3 claude-approval-report.py --generate-settings | jq '.permissions.deny'
 
 Outputs a JSON fragment with deny rules and hook configuration ready to merge into `~/.claude/settings.json`. The stderr commentary shows which rules are already configured, what's new, and how many secret exposures the hook would have blocked.
 
+### Trend analysis
+
+```
+# Daily approval rate trend, all time
+python3 claude-approval-report.py --trend
+
+# Daily trend for last 7 days
+python3 claude-approval-report.py --trend 7d
+
+# Auto-picks weekly buckets for 90-day window
+python3 claude-approval-report.py --trend 90d
+
+# Override auto bucket size
+python3 claude-approval-report.py --trend 30d --bucket week
+
+# Quarterly trend, all time
+python3 claude-approval-report.py --trend --bucket quarter
+```
+
+Shows a time-series table with columns: Total, Auto, Prompted, Rejected, Auto%, Destructive, Mutating, R/O, Secrets. Directional arrows indicate period-over-period changes. Bucket size is auto-selected based on window duration (day for <=31d, week for <=90d, month for <=730d, quarter for <=1825d, year for >5y), or can be overridden with `--bucket`. Composes with `--since` and `--project`. Warns when output exceeds 100 rows.
+
 ## PreToolUse hook: block-secrets.py
 
 The `hooks/block-secrets.py` script is a Claude Code PreToolUse hook that blocks commands before execution. It catches two classes of leaks that deny rules alone cannot prevent:
