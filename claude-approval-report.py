@@ -1261,6 +1261,102 @@ def render_summary(all_records, out=None):
             _print(f"    {i}. {pattern:<40} ({count} approvals, {risk})")
 
 
+def render_trend(all_records, bucket="day", out=None):
+    """Render a time-series trend of approval rates."""
+    if out is None:
+        out = sys.stdout
+    _print = lambda *a, **kw: print(*a, file=out, **kw)
+
+    def parse_ts(ts):
+        if not ts:
+            return None
+        try:
+            return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        except (ValueError, AttributeError):
+            return None
+
+    def bucket_key(dt):
+        if bucket == "week":
+            monday = dt - timedelta(days=dt.weekday())
+            return monday.strftime("%Y-%m-%d")
+        elif bucket == "month":
+            return dt.strftime("%Y-%m")
+        return dt.strftime("%Y-%m-%d")
+
+    buckets = defaultdict(lambda: {"total": 0, "auto": 0, "prompted": 0, "rejected": 0,
+                                    "destructive": 0, "mutating": 0, "read-only": 0, "secrets": 0})
+
+    for r in all_records:
+        dt = parse_ts(r.get("timestamp", ""))
+        if dt is None:
+            continue
+        key = bucket_key(dt)
+        b = buckets[key]
+        b["total"] += 1
+        if r["rejected"]:
+            b["rejected"] += 1
+        elif r["auto_allowed"]:
+            b["auto"] += 1
+        else:
+            b["prompted"] += 1
+        risk = r.get("risk", "unknown")
+        if risk in ("destructive", "mutating", "read-only"):
+            b[risk] += 1
+        display = r.get("display", "")
+        if "[secrets]" in display:
+            b["secrets"] += 1
+
+    if not buckets:
+        _print("No timestamped records found.")
+        return
+
+    sorted_keys = sorted(buckets.keys())
+
+    label = {"day": "Day", "week": "Week of", "month": "Month"}.get(bucket, "Period")
+    _print(f"CLAUDE CODE TREND ANALYSIS (by {bucket})")
+    _print(f"{'='*90}")
+    _print(f"  {label:<12} {'Total':>6} {'Auto':>6} {'Prompted':>8} {'Rej':>4} {'Auto%':>6} {'Destr':>6} {'Mutat':>6} {'R/O':>6} {'Sec':>4}")
+    _print(f"  {'-'*12} {'-'*6} {'-'*6} {'-'*8} {'-'*4} {'-'*6} {'-'*6} {'-'*6} {'-'*6} {'-'*4}")
+
+    prev_prompted = None
+    for key in sorted_keys:
+        b = buckets[key]
+        auto_pct = (b["auto"] / b["total"] * 100) if b["total"] else 0
+        arrow = ""
+        if prev_prompted is not None and b["prompted"] > 0:
+            if b["prompted"] < prev_prompted:
+                arrow = " ↓"
+            elif b["prompted"] > prev_prompted:
+                arrow = " ↑"
+        prev_prompted = b["prompted"]
+        _print(f"  {key:<12} {b['total']:>6,} {b['auto']:>6,} {b['prompted']:>8,}{arrow:<2} {b['rejected']:>4} {auto_pct:>5.1f}% {b['destructive']:>6} {b['mutating']:>6,} {b['read-only']:>6,} {b['secrets']:>4}")
+
+    totals = {"total": 0, "auto": 0, "prompted": 0, "rejected": 0,
+              "destructive": 0, "mutating": 0, "read-only": 0, "secrets": 0}
+    for b in buckets.values():
+        for k in totals:
+            totals[k] += b[k]
+
+    _print(f"  {'-'*12} {'-'*6} {'-'*6} {'-'*8} {'-'*4} {'-'*6} {'-'*6} {'-'*6} {'-'*6} {'-'*4}")
+    total_auto_pct = (totals["auto"] / totals["total"] * 100) if totals["total"] else 0
+    _print(f"  {'TOTAL':<12} {totals['total']:>6,} {totals['auto']:>6,} {totals['prompted']:>8,}    {totals['rejected']:>4} {total_auto_pct:>5.1f}% {totals['destructive']:>6} {totals['mutating']:>6,} {totals['read-only']:>6,} {totals['secrets']:>4}")
+
+    if len(sorted_keys) >= 2:
+        first = buckets[sorted_keys[0]]
+        last = buckets[sorted_keys[-1]]
+        first_pct = (first["auto"] / first["total"] * 100) if first["total"] else 0
+        last_pct = (last["auto"] / last["total"] * 100) if last["total"] else 0
+        delta = last_pct - first_pct
+        direction = "up" if delta > 0 else "down" if delta < 0 else "flat"
+        _print(f"\n  Auto-allow rate: {first_pct:.1f}% ({sorted_keys[0]}) -> {last_pct:.1f}% ({sorted_keys[-1]}), {direction} {abs(delta):.1f}pp")
+
+        first_prompted = first["prompted"]
+        last_prompted = last["prompted"]
+        if first_prompted > 0:
+            prompt_change = ((last_prompted - first_prompted) / first_prompted) * 100
+            _print(f"  Prompts: {first_prompted} ({sorted_keys[0]}) -> {last_prompted} ({sorted_keys[-1]}), {prompt_change:+.0f}%")
+
+
 BASELINE_DENY_RULES = [
     "Read(**/.env*)",
     "Read(**/.dev.vars*)",
@@ -1565,6 +1661,14 @@ def main():
         help="Compact dashboard instead of full report.",
     )
     parser.add_argument(
+        "--trend",
+        nargs="?",
+        const="day",
+        default=None,
+        choices=["day", "week", "month"],
+        help="Show approval rate trends over time. Bucket by day (default), week, or month.",
+    )
+    parser.add_argument(
         "--why",
         default=None,
         metavar="COMMAND",
@@ -1679,6 +1783,19 @@ def main():
                 print("Aborted.", file=sys.stderr)
                 return
             apply_suggestions(all_records, dry_run=False, quiet=True, **apply_kwargs)
+    elif args.trend is not None:
+        if args.output is None:
+            render_trend(all_records, bucket=args.trend)
+        else:
+            if args.output == "auto":
+                out_path = f"claude-trend-{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H%M%SZ')}.txt"
+            elif os.path.isdir(args.output):
+                out_path = os.path.join(args.output, f"claude-trend-{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H%M%SZ')}.txt")
+            else:
+                out_path = args.output
+            with open(out_path, "w") as f:
+                render_trend(all_records, bucket=args.trend, out=f)
+            print(f"Trend written to {out_path}", file=sys.stderr)
     else:
         if args.summary:
             renderer = render_summary
