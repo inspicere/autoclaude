@@ -33,7 +33,7 @@ No dependencies beyond Python 3.8+ stdlib. Test suites: `test_report.py` (155 te
 Everything lives in `claude-approval-report.py`. The processing pipeline:
 
 1. **Allowlist loading** — reads `~/.claude/settings.json` (global) and per-project `settings.local.json` / `settings.json` to know which patterns are already auto-allowed
-2. **Session parsing** (`process_session`) — reads JSONL files, correlates assistant tool_use blocks with user result records via `sourceToolAssistantUUID`/`toolUseID`, determines approval/rejection status
+2. **Session parsing** (`process_session`) — reads JSONL files (using `**/*.jsonl` recursive glob to include subagent transcripts), correlates assistant tool_use blocks with user result records via `sourceToolAssistantUUID`/`toolUseID`, determines approval/rejection status
 3. **Risk classification** (`classify_risk`) — categorizes each tool call as destructive/mutating/read-only. Bash commands get sub-command-aware logic for git, curl, find, sed, ansible-playbook. Secret detection runs 22 provider-specific token regexes plus Shannon entropy on base64 blobs (primary >= 3.5 threshold plus secondary unique-char-ratio check for 3.0-3.5 range to catch padding evasion)
 4. **Command normalization** (`normalize_command`) — groups variants (e.g., all `git add` invocations, all `ssh` to the same host) for aggregation
 5. **Rendering** — six output modes: full tables (`render_report`), compact dashboard (`render_summary`), JSON (`render_json`), single-command lookup (`render_why`), security settings generation (`render_generate_settings`), time-series trend (`render_trend`)
