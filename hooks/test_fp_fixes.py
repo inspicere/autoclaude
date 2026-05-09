@@ -6,7 +6,7 @@ import subprocess
 import sys
 import os
 
-HOOK = '/home/terrabot/autoclaude/hooks/block-secrets.py'
+HOOK = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'block-secrets.py')
 HOME = os.path.expanduser('~')
 S = HOME + '/.env'
 

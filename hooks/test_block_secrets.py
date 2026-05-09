@@ -219,7 +219,7 @@ def main():
     # the path, we'll test by using the default path.
     # Instead, let's just test with the default log path.
     default_audit_log = os.path.expanduser('~/.claude/hook-audit.jsonl')
-    # Clear it first
+    os.makedirs(os.path.dirname(default_audit_log), exist_ok=True)
     try:
         os.unlink(default_audit_log)
     except FileNotFoundError:
