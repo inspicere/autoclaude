@@ -24,7 +24,7 @@ import sys
 import time
 
 _DEBUG = os.environ.get("HOOK_DEBUG", "") == "1"
-_AUDIT = os.environ.get("HOOK_AUDIT", "") == "1"
+_AUDIT = os.environ.get("HOOK_AUDIT", "1") == "1"
 _AUDIT_LOG = os.path.join(os.path.expanduser("~"), ".claude", "hook-audit.jsonl")
 
 
@@ -33,7 +33,7 @@ def _debug(msg):
         print(f"[hook-debug] {msg}", file=sys.stderr)
 
 
-def _audit_log(decision, tool_name, summary="", reason=""):
+def _audit_log(decision, tool_name, summary="", reason="", command=""):
     """Append a structured JSON record to the audit log."""
     if not _AUDIT:
         return
@@ -46,6 +46,8 @@ def _audit_log(decision, tool_name, summary="", reason=""):
         record["summary"] = summary[:200]
     if reason:
         record["reason"] = reason[:300]
+    if command:
+        record["command"] = command[:500]
     try:
         with open(_AUDIT_LOG, "a") as f:
             f.write(json.dumps(record, separators=(",", ":")) + "\n")
@@ -912,11 +914,12 @@ _REMEDIATION_HINTS = (
 
 _ctx_tool = ""
 _ctx_summary = ""
+_ctx_command = ""
 
 
 def block(reason):
     _debug(f"decision: BLOCK — {reason[:80]}")
-    _audit_log("block", _ctx_tool, _ctx_summary, reason)
+    _audit_log("block", _ctx_tool, _ctx_summary, reason, _ctx_command)
     hint = ""
     reason_lower = reason.lower()
     for pattern, h in _REMEDIATION_HINTS:
@@ -930,7 +933,7 @@ def block(reason):
 def warn(reason):
     """Warn about potential secret exposure, prompting user to confirm."""
     _debug(f"decision: WARN — {reason[:80]}")
-    _audit_log("warn", _ctx_tool, _ctx_summary, reason)
+    _audit_log("warn", _ctx_tool, _ctx_summary, reason, _ctx_command)
     hint = "Use MCP servers or vault CLI in a subshell to avoid leaking secrets into chat."
     reason_lower = reason.lower()
     for pattern, h in _REMEDIATION_HINTS:
@@ -981,7 +984,7 @@ def main():
     tool_input = data.get("tool_input", {})
     _debug(f"tool_name={tool_name}")
 
-    global _ctx_tool, _ctx_summary
+    global _ctx_tool, _ctx_summary, _ctx_command
     _ctx_tool = tool_name
 
     if tool_name in _PASSTHROUGH_TOOLS or tool_name.startswith("mcp__"):
@@ -1000,6 +1003,7 @@ def main():
         _debug(f"Bash command ({len(command)} chars)")
         first_word = command.split()[0] if command.split() else ""
         _ctx_summary = f"{first_word} ({len(command)} chars)"
+        _ctx_command = command
 
         sub_cmds = _split_shell_commands(command)
         for m in _RE_COMMAND_SUBST.finditer(command):
@@ -1119,7 +1123,7 @@ def main():
                         block(f"BLOCKED: Written content contains: {reason}")
 
     _debug("decision: ALLOW")
-    _audit_log("allow", _ctx_tool, _ctx_summary)
+    _audit_log("allow", _ctx_tool, _ctx_summary, command=_ctx_command)
     sys.exit(0)
 
 

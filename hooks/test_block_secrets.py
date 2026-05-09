@@ -257,16 +257,17 @@ def main():
     results.append(ok)
     print(f"{'PASS' if ok else 'FAIL'} [BLOCK] HOOK_AUDIT=1 writes block record")
 
-    # No audit when HOOK_AUDIT is unset
+    # No audit when HOOK_AUDIT=0
     try:
         os.unlink(default_audit_log)
     except FileNotFoundError:
         pass
     data = json.dumps({'tool_name': 'Bash', 'tool_input': {'command': 'ls'}})
-    r = subprocess.run(['python3', HOOK], input=data, capture_output=True, text=True, timeout=10)
+    env_no_audit = dict(os.environ, HOOK_AUDIT='0')
+    r = subprocess.run(['python3', HOOK], input=data, capture_output=True, text=True, timeout=10, env=env_no_audit)
     ok = r.returncode == 0 and not os.path.exists(default_audit_log)
     results.append(ok)
-    print(f"{'PASS' if ok else 'FAIL'} [ALLOW] HOOK_AUDIT unset writes no audit log")
+    print(f"{'PASS' if ok else 'FAIL'} [ALLOW] HOOK_AUDIT=0 writes no audit log")
 
     # Cleanup
     try:

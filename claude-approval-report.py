@@ -1611,6 +1611,125 @@ def render_generate_settings(all_records, out=None):
     out.write("\n")
 
 
+def render_warns(all_records, since=None, out=None):
+    """Show hook warning events from the audit log, cross-referenced with session data."""
+    if out is None:
+        out = sys.stdout
+
+    audit_path = CLAUDE_DIR / "hook-audit.jsonl"
+    if not audit_path.exists():
+        print("No hook audit log found at ~/.claude/hook-audit.jsonl", file=out)
+        print("Audit logging is enabled by default in the hook (HOOK_AUDIT=1).", file=out)
+        return
+
+    warns = []
+    try:
+        with open(audit_path) as f:
+            for line in f:
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if rec.get("decision") != "warn":
+                    continue
+                warns.append(rec)
+    except Exception:
+        print(f"Error reading {audit_path}", file=out)
+        return
+
+    if since:
+        filtered = []
+        for w in warns:
+            try:
+                ts = datetime.fromisoformat(w["ts"])
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                if ts >= since:
+                    filtered.append(w)
+            except (KeyError, ValueError):
+                continue
+        warns = filtered
+
+    if not warns:
+        print("No hook warnings found.", file=out)
+        return
+
+    # Build lookup of session commands by approximate timestamp + command text
+    # Session records have "timestamp" and tool_input.command
+    session_cmds = {}
+    for r in all_records:
+        if r["tool_name"] != "Bash":
+            continue
+        cmd = r.get("full_command", "")
+        ts = r.get("timestamp", "")
+        if cmd and ts:
+            session_cmds[(ts[:16], cmd[:200])] = r
+
+    print(f"\n{'='*78}", file=out)
+    print(f"  Hook Warnings — {len(warns)} event(s)", file=out)
+    print(f"{'='*78}\n", file=out)
+
+    approved = 0
+    rejected = 0
+    unknown = 0
+
+    for w in warns:
+        ts_str = w.get("ts", "?")
+        cmd = w.get("command", w.get("summary", "?"))
+        reason = w.get("reason", "?")
+
+        # Try to find this command in session data to determine user decision
+        decision = "unknown"
+        try:
+            ts_prefix = ts_str[:16]
+        except (TypeError, IndexError):
+            ts_prefix = ""
+
+        cmd_short = cmd[:200] if cmd else ""
+        # Try exact match, then fuzzy by command text
+        matched_rec = session_cmds.get((ts_prefix, cmd_short))
+        if not matched_rec:
+            for key, rec in session_cmds.items():
+                if cmd_short and cmd_short in key[1]:
+                    matched_rec = rec
+                    break
+
+        if matched_rec:
+            if matched_rec.get("rejected"):
+                decision = "rejected"
+                rejected += 1
+            else:
+                decision = "approved"
+                approved += 1
+        else:
+            unknown += 1
+
+        # Format timestamp for display
+        try:
+            dt = datetime.fromisoformat(ts_str)
+            time_display = dt.strftime("%Y-%m-%d %H:%M")
+        except (ValueError, TypeError):
+            time_display = ts_str[:16] if ts_str else "?"
+
+        decision_display = {
+            "approved": "APPROVED",
+            "rejected": "REJECTED",
+            "unknown": "—",
+        }[decision]
+
+        print(f"  {time_display}  [{decision_display:>8}]  {cmd[:70]}", file=out)
+        print(f"    Reason: {reason}", file=out)
+        print(file=out)
+
+    print(f"  {'—'*70}", file=out)
+    print(f"  Total: {len(warns)} warns | "
+          f"{approved} approved | {rejected} rejected | {unknown} no session match", file=out)
+    if unknown:
+        print(f"  Note: 'no session match' means the warn was from a non-session context", file=out)
+        print(f"        (e.g. test run, manual invocation) or session data was pruned.", file=out)
+    print(file=out)
+
+
 def render_why(query, all_records):
     """Look up why a specific command gets prompted and how to fix it."""
     q = query.lower()
@@ -1797,6 +1916,13 @@ def main():
              "Outputs JSON settings fragment to stdout. "
              "Combine with --since/--project for data-driven analysis.",
     )
+    parser.add_argument(
+        "--warns",
+        action="store_true",
+        default=False,
+        help="Show hook warning events from ~/.claude/hook-audit.jsonl. "
+             "Cross-references with session data to show user approval decisions.",
+    )
     args = parser.parse_args()
 
     trend_window = args.trend if args.trend is not None else None
@@ -1849,7 +1975,7 @@ def main():
 
     all_records = filter_records(all_records, since=since, project=args.project)
 
-    if not all_records and not args.generate_settings:
+    if not all_records and not args.generate_settings and not args.warns:
         print("No tool call data found.", file=sys.stderr)
         sys.exit(1)
 
@@ -1879,6 +2005,10 @@ def main():
 
     if args.why:
         render_why(args.why, all_records)
+        return
+
+    if args.warns:
+        render_warns(all_records, since=since)
         return
 
     if args.apply is not None:

@@ -23,10 +23,12 @@ python3 claude-approval-report.py --trend 90d          # auto-picks weekly bucke
 python3 claude-approval-report.py --trend 30d --bucket week  # override auto bucket
 python3 claude-approval-report.py --trend --bucket quarter   # quarterly, all time
 python3 claude-approval-report.py --session current --summary  # latest session only
+python3 claude-approval-report.py --warns              # hook warning events + user decisions
+python3 claude-approval-report.py --warns --since 7d   # warns from the last week
 python3 claude-approval-report.py -o           # write to auto-named timestamped file
 ```
 
-No dependencies beyond Python 3.8+ stdlib. Test suites: `tests/test_report.py` (155 tests for the main script's pure functions), `hooks/test_block_secrets.py` (67 tests), `hooks/test_bypass_fixes.py` (110 tests), `hooks/test_round2_bypass_fixes.py` (50 tests), `hooks/test_fp_fixes.py` (28 tests), `hooks/test_infra_usability.py` (136 tests), `hooks/test_warn_secrets.py` (12 tests) — 558 total.
+No dependencies beyond Python 3.8+ stdlib. Test suites: `tests/test_report.py` (155 tests for the main script's pure functions), `hooks/test_block_secrets.py` (67 tests), `hooks/test_bypass_fixes.py` (110 tests), `hooks/test_round2_bypass_fixes.py` (50 tests), `hooks/test_fp_fixes.py` (28 tests), `hooks/test_infra_usability.py` (136 tests), `hooks/test_warn_secrets.py` (12 tests), `hooks/test_warn_mode.py` (24 tests) — 582 total.
 
 ## Architecture
 
@@ -36,7 +38,7 @@ Everything lives in `claude-approval-report.py`. The processing pipeline:
 2. **Session parsing** (`process_session`) — reads JSONL files (using `**/*.jsonl` recursive glob to include subagent transcripts), correlates assistant tool_use blocks with user result records via `sourceToolAssistantUUID`/`toolUseID`, determines approval/rejection status
 3. **Risk classification** (`classify_risk`) — categorizes each tool call as destructive/mutating/read-only. Bash commands get sub-command-aware logic for git, curl, find, sed, ansible-playbook. Secret detection runs 22 provider-specific token regexes plus Shannon entropy on base64 blobs (primary >= 3.5 threshold plus secondary unique-char-ratio check for 3.0-3.5 range to catch padding evasion)
 4. **Command normalization** (`normalize_command`) — groups variants (e.g., all `git add` invocations, all `ssh` to the same host) for aggregation
-5. **Rendering** — six output modes: full tables (`render_report`), compact dashboard (`render_summary`), JSON (`render_json`), single-command lookup (`render_why`), security settings generation (`render_generate_settings`), time-series trend (`render_trend`)
+5. **Rendering** — seven output modes: full tables (`render_report`), compact dashboard (`render_summary`), JSON (`render_json`), single-command lookup (`render_why`), security settings generation (`render_generate_settings`), time-series trend (`render_trend`), hook warning audit (`render_warns`)
 6. **Apply** (`apply_suggestions`) — writes suggested patterns to project `settings.local.json` files
 7. **Generate settings** (`render_generate_settings`) — emits deny rules + hook config as a mergeable JSON fragment, with data-driven analysis of actual secret exposures via `_find_secret_exposures`
 
@@ -54,7 +56,7 @@ The hook covers gaps that deny rules cannot:
 2. Sensitive file reads via Bash (`cat .env`) that bypass Read tool deny rules
 3. Bypass vectors: subshell wrapping (`bash -c`), `eval`, interpreter file I/O (`python3 -c "open('.env')"`), file copy/move/link (`cp .env /tmp/x`), `dd if=`, stdin redirection (`< .env`), process substitution (`<()`), heredoc-to-interpreter, backtick substitution, pipe-to-shell (`echo cmd | bash`), subshell/brace grouping (`(cmd)`, `{ cmd; }`), variable assignment tracking, SSH remote commands, `xargs -a`/`--arg-file`, long-form file flags (`--from-file=`, `--files0-from=`), 45+ file-reading tools
 
-Operational features: `HOOK_DEBUG=1` emits debug trace to stderr (tool routing, pattern matches, entropy scores, sensitive path checks). `HOOK_AUDIT=1` writes structured JSONL records to `~/.claude/hook-audit.jsonl` (timestamp, decision, tool, summary, reason). Both are zero-cost when disabled. Fail-closed design: unknown tool types are blocked, malformed input is blocked.
+Operational features: `HOOK_DEBUG=1` emits debug trace to stderr (tool routing, pattern matches, entropy scores, sensitive path checks). Audit logging is enabled by default (`HOOK_AUDIT=1`) and writes structured JSONL records to `~/.claude/hook-audit.jsonl` (timestamp, decision, tool, summary, reason, command). Set `HOOK_AUDIT=0` to disable. Debug is zero-cost when disabled. Fail-closed design: unknown tool types are blocked, malformed input is blocked. The `--warns` flag on the report script cross-references audit warn events with session data to show user approval decisions.
 
 ## PostToolUse hook (`hooks/warn-secrets-output.py`)
 
