@@ -1040,6 +1040,7 @@ def main():
 
             if base_parts:
                 base = os.path.basename(base_parts[0])
+                is_message_cmd = (base == 'git' and any(p in ('commit', 'tag', 'notes') for p in base_parts[1:4]))
                 if base not in _GREP_FAMILY:
                     result = _check_command_secrets(sub_cmd)
                     if result:
@@ -1047,7 +1048,7 @@ def main():
                         if level == "block":
                             _debug(f"secret match: {reason.split(':')[0] if ':' in reason else 'unknown category'}")
                             block(f"BLOCKED: {reason}")
-                        else:
+                        elif not is_message_cmd:
                             _debug(f"secret warning: {reason[:60]}")
                             secret_warnings.append(reason)
 

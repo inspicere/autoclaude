@@ -79,6 +79,12 @@ tests = [
     ("tar with -p (preserve, not password)",
      'tar -xpf archive.tar.gz',
      "allow"),
+    ("git commit msg with auth example text (not a real secret)",
+     'git commit -m "fix: handle Authorization: Token $TOKEN pattern"',
+     "allow"),
+    ("git commit msg with literal secret still blocks",
+     'git commit -m "oops ghp_abcdefghijklmnopqrstuvwxyz1234567890"',
+     "block"),
 ]
 
 passed = 0
