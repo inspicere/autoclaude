@@ -946,7 +946,7 @@ def warn(reason):
             "permissionDecision": "ask",
             "permissionDecisionReason": (
                 f"SECRET LEAK WARNING: {reason}\n"
-                f"This command will expose a secret in chat history and session logs.\n"
+                f"This command may expose a secret in chat history and session logs.\n"
                 f"Hint: {hint}\n"
                 f"Approve to proceed anyway, or reject to use a safer approach."
             ),
