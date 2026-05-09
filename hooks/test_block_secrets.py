@@ -93,6 +93,15 @@ def main():
     print('\n=== MEDIUM: heredoc should not false-positive ===')
     results.append(bash('cat <<EOF\nhello\nEOF', False))
 
+    print('\n=== Interpreter inline code: quoted dotfile names ===')
+    # Quoted bare dotfile names in string comparisons — NOT file access
+    results.append(bash("""python3 -c "x = [d for d in deny if '.env' in d]" """, False))
+    results.append(bash("""python3 -c "if name.endswith('.env'): pass" """, False))
+    results.append(bash("""python3 -c "'.vault-token' in config" """, False))
+    # Path references with / or ~ — real file access, should block
+    results.append(bash(f'python3 -c "open(\'~/.env\').read()"', True))
+    results.append(bash(f'python3 -c "open(\'{HOME}/.env\').read()"', True))
+
     print('\n=== REGRESSION: Legitimate operations still allowed ===')
     results.append(bash('ls -la', False))
     results.append(bash('git status', False))

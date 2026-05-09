@@ -214,7 +214,7 @@ Add to `hooks` in `~/.claude/settings.json`:
 - 22 provider-specific token patterns (GitHub, AWS, Vault, Anthropic, Slack, Stripe, etc.)
 - JWT tokens, private key headers, curl Authorization headers
 - Secret variable assignments (`VAULT_TOKEN=s.xxx`) with smart filtering to avoid false positives on variable references and URLs
-- High-entropy base64 blobs (Shannon entropy >= 3.5)
+- High-entropy base64 blobs (Shannon entropy >= 3.5, with secondary unique-char-ratio check for 3.0-3.5 range to catch padding evasion)
 - 45+ file-reading commands (`cat`, `head`, `tail`, `base64`, `sort`, `cut`, `jq`, `shuf`, `zcat`, `bzcat`, etc.) targeting sensitive paths (`.env*`, `.ssh/id_*`, `.aws/credentials`, `/etc/shadow`, etc.)
 - Subshell wrapping (`bash -c 'cat .env'`, `sh -c`, `zsh -c`) — unwraps and recursively re-checks
 - Eval wrapping (`eval 'cat .env'`) — unwraps and recursively re-checks
@@ -248,7 +248,7 @@ Add to `hooks` in `~/.claude/settings.json`:
 
 - **Copy-then-read**: The hook blocks `cp`, `mv`, `ln`, `install`, and `rsync` when the source is a sensitive path, preventing the first step of a copy-then-read chain. However, if a sensitive file was copied to a non-sensitive path *before* the hook was installed, the copy is not tracked. For defense in depth, use filesystem-level controls (mandatory access control, audit logging) on sensitive files.
 - **Output capture**: The PreToolUse hook inspects commands *before* execution but cannot inspect command *output*. A `vault kv get` that prints secrets to stdout will not be blocked by it. **Mitigation:** The `warn-secrets-output.py` PostToolUse hook scans Bash output for known token patterns, JWTs, and private key material, then warns Claude not to use the values and advises the user to rotate. MCP servers remain the preferred path — auth stays server-side and secrets never enter the session.
-- **Encoded payloads**: Base64-encoded or obfuscated secrets that don't match known token patterns and fall below the entropy threshold (Shannon entropy < 3.5 on 32+ char strings) will pass through. **Mitigation:** Lowering the entropy threshold increases false positives on legitimate base64 data. A decode-then-rescan approach is possible but adds latency and complexity. The current threshold is a pragmatic balance — most real secrets exceed 3.5 bits/char.
+- **Encoded payloads**: Base64-encoded or obfuscated secrets that don't match known token patterns and fall below the entropy threshold will pass through. The primary threshold is Shannon entropy >= 3.5 on 32+ char strings. A secondary check catches padding evasion attempts in the 3.0-3.5 range using unique character ratio (>= 0.4) and max character frequency (<= 0.15). Strings below 3.0 bits/char or failing the secondary check will pass through. **Mitigation:** The dual-threshold approach catches most real secrets while minimizing false positives.
 - **Variable/runtime indirection** (2026-05-08): Simple variable assignment tracking was added (`F=.env; cat $F` is now detected), along with while-read loop variable tracking and `xargs -a`/`--arg-file` detection. However, shell function indirection (`r() { cat "$1"; }; r .env`), bash array expansion (`a=(cat .env); "${a[@]}"`), and runtime path construction in scripts remain undetectable — fundamental limitations of pre-execution static analysis.
 
 ## PostToolUse hook: warn-secrets-output.py
