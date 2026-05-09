@@ -33,7 +33,8 @@ def _debug(msg):
         print(f"[hook-debug] {msg}", file=sys.stderr)
 
 
-def _audit_log(decision, tool_name, summary="", reason="", command=""):
+def _audit_log(decision, tool_name, summary="", reason="", command="",
+               confidence=""):
     """Append a structured JSON record to the audit log."""
     if not _AUDIT:
         return
@@ -48,6 +49,8 @@ def _audit_log(decision, tool_name, summary="", reason="", command=""):
         record["reason"] = reason[:300]
     if command:
         record["command"] = command[:500]
+    if confidence:
+        record["confidence"] = confidence
     try:
         with open(_AUDIT_LOG, "a") as f:
             f.write(json.dumps(record, separators=(",", ":")) + "\n")
@@ -301,6 +304,20 @@ _SHORT_P_PASSWORD_COMMANDS = frozenset({
     'testsaslauthd', 'ldapsearch', 'ldapmodify', 'ldapadd',
     'smbclient', 'htpasswd', 'kinit',
 })
+
+
+def _classify_leak_confidence(command):
+    """Estimate whether a runtime-expanded secret is likely to appear in output.
+
+    Returns 'high' if the command is likely to print the secret to stdout,
+    'low' if the secret is consumed silently (e.g. sent in a request header).
+    """
+    lower = command.lower()
+    if re.search(r'\becho\b|\bprintf\b', lower):
+        return "high"
+    if re.search(r'>\s*/dev/null|--output\s+/dev/null|-o\s+/dev/null', lower):
+        return "low"
+    return "low"
 
 
 def _check_command_secrets(command):
@@ -930,23 +947,28 @@ def block(reason):
     sys.exit(2)
 
 
-def warn(reason):
+def warn(reason, confidence="low"):
     """Warn about potential secret exposure, prompting user to confirm."""
-    _debug(f"decision: WARN — {reason[:80]}")
-    _audit_log("warn", _ctx_tool, _ctx_summary, reason, _ctx_command)
+    _debug(f"decision: WARN ({confidence}) — {reason[:80]}")
+    _audit_log("warn", _ctx_tool, _ctx_summary, reason, _ctx_command,
+               confidence=confidence)
     hint = "Use MCP servers or vault CLI in a subshell to avoid leaking secrets into chat."
     reason_lower = reason.lower()
     for pattern, h in _REMEDIATION_HINTS:
         if pattern.lower() in reason_lower:
             hint = h
             break
+    if confidence == "high":
+        exposure_msg = "This command is likely to expose a secret in chat history and session logs."
+    else:
+        exposure_msg = "This command may expose a secret in chat history and session logs."
     output = {
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
             "permissionDecision": "ask",
             "permissionDecisionReason": (
                 f"SECRET LEAK WARNING: {reason}\n"
-                f"This command may expose a secret in chat history and session logs.\n"
+                f"{exposure_msg}\n"
                 f"Hint: {hint}\n"
                 f"Approve to proceed anyway, or reject to use a safer approach."
             ),
@@ -1086,7 +1108,8 @@ def main():
                                 block(f"BLOCKED: Command accesses sensitive file via variable ${varname}")
 
         if secret_warnings:
-            warn(secret_warnings[0])
+            confidence = _classify_leak_confidence(command)
+            warn(secret_warnings[0], confidence)
 
     elif tool_name in ("Read", "Edit", "Write"):
         file_path = tool_input.get("file_path", "")
