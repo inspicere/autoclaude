@@ -180,6 +180,22 @@ python3 claude-approval-report.py --trend --bucket quarter
 
 Shows a time-series table with columns: Total, Auto, Prompted, Rejected, Auto%, Destructive, Mutating, R/O, Secrets. Directional arrows indicate period-over-period changes. Bucket size is auto-selected based on window duration (day for <=31d, week for <=90d, month for <=730d, quarter for <=1825d, year for >5y), or can be overridden with `--bucket`. Composes with `--since` and `--project`. Warns when output exceeds 100 rows.
 
+### Hook warning audit
+
+```
+# Show all hook warning events and whether the user approved or rejected them
+python3 claude-approval-report.py --warns
+
+# Warnings from the last week only
+python3 claude-approval-report.py --warns --since 7d
+```
+
+Reads `~/.claude/hook-audit.jsonl` for `decision: "warn"` records from the PostToolUse hook, cross-references with session JSONL data to determine whether the user approved or rejected each warning. Displays a table with timestamp, command, reason, and user decision (APPROVED/REJECTED/no session match). Composes with `--since`.
+
+## CI/CD
+
+A Forgejo Actions workflow (`.forgejo/workflows/test.yml`) runs all 8 test suites (582 tests) on every push to `main` and on pull requests. Results are uploaded to DefectDojo as "Generic Findings Import" — test failures become findings, clean runs auto-close previous findings. The test runner (`scripts/ci-test-runner.py`) handles multi-suite execution and result conversion.
+
 ## PreToolUse hook: block-secrets.py
 
 The `hooks/block-secrets.py` script is a Claude Code PreToolUse hook that blocks commands before execution. It catches two classes of leaks that deny rules alone cannot prevent:

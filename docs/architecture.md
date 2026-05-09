@@ -189,4 +189,6 @@ To deploy this in a different environment:
 | `settings/recommended-deny.json` | Layer 1 — reference deny rules |
 | `claude-approval-report.py` | Analysis — reports what got through, suggests improvements |
 | `scripts/vault-token-renew.sh` | Maintenance — weekly Vault token renewal cron job |
+| `scripts/ci-test-runner.py` | CI — runs all test suites, converts results to DefectDojo findings |
+| `.forgejo/workflows/test.yml` | CI — Forgejo Actions workflow, triggers on push/PR to main |
 | `docs/auth-best-practices.md` | Index of safe patterns for working within the layers |
