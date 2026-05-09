@@ -542,7 +542,18 @@ def _strip_wrappers(parts):
 
 def _check_sensitive_paths_in_text(text):
     """Scan arbitrary text for sensitive file paths. Returns first match or None."""
-    for token in re.findall(r'[/~.][\w./_-]+', text):
+    for m in re.finditer(r'[/~.][\w./_-]+', text):
+        token = m.group()
+        # Skip bare dotfile names (no path separator) that are quoted —
+        # these are likely string comparisons, not file operations.
+        # Tokens with / or ~ are real paths and should always be checked.
+        if '/' not in token and not token.startswith('~'):
+            start = m.start()
+            end = m.end()
+            if (start > 0 and end < len(text)
+                    and text[start - 1] in ("'", '"')
+                    and text[end] in ("'", '"')):
+                continue
         if _is_sensitive_path(token):
             return token
     return None
