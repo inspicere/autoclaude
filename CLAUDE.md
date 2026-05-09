@@ -74,6 +74,10 @@ A self-contained PostToolUse hook that scans tool output for leaked secrets (kno
 
 Reference these docs when adding new secret patterns or modifying detection logic to ensure the documented workarounds remain valid.
 
+## CI/CD (`scripts/ci-test-runner.py`, `.forgejo/workflows/test.yml`)
+
+Forgejo Actions workflow runs all 8 test suites (582 tests) on push to `main` and on PRs. Uses `node:22-slim` image on the `docker` runner label, installs Python via apt. Results are uploaded to DefectDojo as "Generic Findings Import" — test failures become findings, clean runs auto-close previous findings via `close_old_findings=true`. Product: `autoclaude` (ID 21), Engagement: `CI Tests` (ID 36), Product Type: `Inspicere Projects`. The `DEFECTDOJO_API_TOKEN` secret is configured on the Forgejo repo.
+
 ## Known Issues (from 2026-05-08 red team engagement) — ALL FIXABLE ISSUES RESOLVED
 
 A two-round multi-agent red team engagement on 2026-05-08 targeted the hooks with a planted fake secret in `~/autoclaude_engagement_target/.env`. Round 1: 5 parallel agents (Opus + Sonnet) found 7 bypass classes with 30+ working vectors. Round 2: 5 more agents targeted the hardened hook and found 15 additional bypass classes. All fixable issues were remediated. 117 tests total (67 round 1 + 50 round 2), 0 failures. Hook grew from ~504 to ~830 lines.
