@@ -26,7 +26,7 @@ python3 claude-approval-report.py --session current --summary  # latest session 
 python3 claude-approval-report.py -o           # write to auto-named timestamped file
 ```
 
-No dependencies beyond Python 3.8+ stdlib. Test suites: `test_report.py` (155 tests for the main script's pure functions), `test_block_secrets.py` (67 tests), `test_bypass_fixes.py` (110 tests), `test_round2_bypass_fixes.py` (50 tests), `test_fp_fixes.py` (28 tests), `test_infra_usability.py` (136 tests), `test_warn_secrets.py` (12 tests) — 558 total.
+No dependencies beyond Python 3.8+ stdlib. Test suites: `tests/test_report.py` (155 tests for the main script's pure functions), `hooks/test_block_secrets.py` (67 tests), `hooks/test_bypass_fixes.py` (110 tests), `hooks/test_round2_bypass_fixes.py` (50 tests), `hooks/test_fp_fixes.py` (28 tests), `hooks/test_infra_usability.py` (136 tests), `hooks/test_warn_secrets.py` (12 tests) — 558 total.
 
 ## Architecture
 
@@ -59,10 +59,6 @@ Operational features: `HOOK_DEBUG=1` emits debug trace to stderr (tool routing, 
 ## PostToolUse hook (`hooks/warn-secrets-output.py`)
 
 A self-contained PostToolUse hook that scans tool output for leaked secrets (known token patterns, JWTs, private key headers). Cannot prevent the leak but emits `decision: "block"` with a warning to avoid using the values and advise credential rotation. Scans Bash command output, Read tool output, and Edit tool output. Exempts grep-family commands, git diff/log/show output, and Python/test script output (running the hook's own test suite).
-
-## Vault token renewal (`scripts/vault-token-renew.sh`)
-
-Weekly cron job that runs `vault token renew` to extend the terrabot CLI token. Logs to `/var/log/laima/vault-renew.log`. The token has a 768h TTL and is renewable.
 
 ## Reference settings (`settings/recommended-deny.json`)
 
