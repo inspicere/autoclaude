@@ -102,7 +102,7 @@ _CORRELATE = os.environ.get("HOOK_CORRELATE", "1") == "1"
 _RE_VAR_FROM_REASON = re.compile(r'^(\w+) will (?:be set|expand)')
 
 
-def _read_recent_warns(max_age_seconds=10):
+def _read_recent_warns(max_age_seconds=30):
     """Read recent warn entries from the PreToolUse audit log."""
     try:
         size = os.path.getsize(_AUDIT_LOG)
