@@ -8,7 +8,7 @@ import sys
 
 # Import the report module by file path (it has hyphens in the name)
 spec = importlib.util.spec_from_file_location(
-    "report", os.path.join(os.path.dirname(__file__), "claude-approval-report.py")
+    "report", os.path.join(os.path.dirname(__file__), "..", "claude-approval-report.py")
 )
 report = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(report)

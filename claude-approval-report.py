@@ -1395,24 +1395,35 @@ def render_trend(all_records, bucket="day", out=None):
 
     label = {"day": "Day", "week": "Week of", "month": "Month",
              "quarter": "Quarter", "year": "Year"}.get(bucket, "Period")
-    hdr = f"  {label:<12} {'Total':>7} {'Auto':>7} {'Prompted':>10} {'Rej':>4} {'Auto%':>6} {'Destr':>6} {'Mutat':>7} {'R/O':>7} {'Sec':>4}"
-    sep = f"  {'-'*12} {'-'*7} {'-'*7} {'-'*10} {'-'*4} {'-'*6} {'-'*7} {'-'*7} {'-'*7} {'-'*4}"
+    hdr = f"  {label:<12} {'Total':>7} {'Auto':>7} {'Prompted':>10} {'Rej':>4} {'Auto%':>6} {'Avg7':>6} {'Destr':>6} {'Mutat':>7} {'R/O':>7} {'Sec':>4}"
+    sep = f"  {'-'*12} {'-'*7} {'-'*7} {'-'*10} {'-'*4} {'-'*6} {'-'*6} {'-'*7} {'-'*7} {'-'*7} {'-'*4}"
     _print(f"CLAUDE CODE TREND ANALYSIS (by {bucket})")
     _print("=" * len(hdr))
     _print(hdr)
     _print(sep)
 
-    def fmt_row(key, b, arrow=""):
+    auto_pcts = []
+    for key in sorted_keys:
+        b = buckets[key]
+        auto_pcts.append((b["auto"] / b["total"] * 100) if b["total"] else 0)
+
+    rolling_avgs = []
+    for i in range(len(auto_pcts)):
+        window = auto_pcts[max(0, i - 6):i + 1]
+        rolling_avgs.append(sum(window) / len(window))
+
+    def fmt_row(key, b, arrow="", rolling_avg=None):
         auto_pct = (b["auto"] / b["total"] * 100) if b["total"] else 0
         prompted_s = f"{b['prompted']:,}"
         if arrow:
             prompted_s += " " + arrow
+        avg_s = f"{rolling_avg:>5.1f}%" if rolling_avg is not None else "     -"
         return (f"  {key:<12} {b['total']:>7,} {b['auto']:>7,} {prompted_s:>10}"
-                f" {b['rejected']:>4} {auto_pct:>5.1f}% {b['destructive']:>6}"
+                f" {b['rejected']:>4} {auto_pct:>5.1f}% {avg_s} {b['destructive']:>6}"
                 f" {b['mutating']:>7,} {b['read-only']:>7,} {b['secrets']:>4}")
 
     prev_prompted = None
-    for key in sorted_keys:
+    for i, key in enumerate(sorted_keys):
         b = buckets[key]
         arrow = ""
         if prev_prompted is not None and b["prompted"] > 0:
@@ -1421,7 +1432,7 @@ def render_trend(all_records, bucket="day", out=None):
             elif b["prompted"] > prev_prompted:
                 arrow = "↑"
         prev_prompted = b["prompted"]
-        _print(fmt_row(key, b, arrow))
+        _print(fmt_row(key, b, arrow, rolling_avg=rolling_avgs[i]))
 
     totals = {"total": 0, "auto": 0, "prompted": 0, "rejected": 0,
               "destructive": 0, "mutating": 0, "read-only": 0, "secrets": 0}
@@ -1665,7 +1676,7 @@ def resolve_session(session_arg, project_filter=None):
 
     all_jsonl = []
     for d in project_dirs:
-        all_jsonl.extend(d.glob("*.jsonl"))
+        all_jsonl.extend(d.glob("**/*.jsonl"))
 
     if not all_jsonl:
         return []
@@ -1831,7 +1842,7 @@ def main():
             project_name = project_dir.name
             project_allow = load_project_settings(project_name)
             combined_allow = global_allow + project_allow
-            jsonl_files = sorted(project_dir.glob("*.jsonl"))
+            jsonl_files = sorted(project_dir.glob("**/*.jsonl"))
             for jsonl_file in jsonl_files:
                 records = process_session(str(jsonl_file), combined_allow, project_name)
                 all_records.extend(records)
