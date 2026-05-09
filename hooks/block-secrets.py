@@ -283,35 +283,99 @@ def _is_sensitive_path(path):
     return matched
 
 
+_RE_CURL_USER = re.compile(
+    r'\bcurl\b.*?\s(?:-u|--user)\s+(\S+)',
+    re.IGNORECASE,
+)
+
+_LONG_PASSWORD_FLAGS = frozenset({
+    '--password', '--pass', '--passwd', '--passphrase',
+    '--db-password', '--authenticationPassword',
+    '--http-password', '--proxy-password',
+})
+
+_SHORT_P_PASSWORD_COMMANDS = frozenset({
+    'mysql', 'mysqldump', 'mysqladmin', 'mysqlimport',
+    'testsaslauthd', 'ldapsearch', 'ldapmodify', 'ldapadd',
+    'smbclient', 'htpasswd', 'kinit',
+})
+
+
 def _check_command_secrets(command):
-    """Check for embedded secrets in a command string. Returns reason or None."""
+    """Check for embedded secrets in a command string.
+
+    Returns (reason, level) or None.  level is 'block' for literal secrets
+    present in the command text, or 'warn' for patterns that will expand to
+    secrets at runtime (variable/subshell references).
+    """
     if _PREFIXED_TOKEN_PATTERNS.search(command):
-        return "Command contains a known API token/key pattern"
+        return ("Command contains a known API token/key pattern", "block")
 
     if _RE_JWT.search(command):
-        return "Command contains a JWT token"
+        return ("Command contains a JWT token", "block")
 
     if _RE_PRIVATE_KEY.search(command):
-        return "Command contains private key material"
+        return ("Command contains private key material", "block")
 
     if _RE_CURL_AUTH.search(command):
         auth_val = re.search(r'\b(?:Bearer|Token)\s+(\S+)', command, re.IGNORECASE)
         if auth_val:
             val = auth_val.group(1).strip("\"'")
-            if not val.startswith('$') and val.lower() not in _SAFE_PLACEHOLDERS:
-                return "Command contains an Authorization header with credentials"
+            if val.startswith('$'):
+                return ("Authorization header will expand a secret variable at runtime", "warn")
+            elif val.lower() not in _SAFE_PLACEHOLDERS:
+                return ("Command contains an Authorization header with credentials", "block")
         else:
-            return "Command contains an Authorization header with credentials"
+            return ("Command contains an Authorization header with credentials", "block")
+
+    m_user = _RE_CURL_USER.search(command)
+    if m_user:
+        val = m_user.group(1).strip("\"'")
+        if ':' in val:
+            _, password = val.split(':', 1)
+            if password.startswith('$'):
+                return ("curl --user password will expand a secret variable at runtime", "warn")
+            elif password and password.lower() not in _SAFE_PLACEHOLDERS:
+                return ("curl --user contains inline credentials", "block")
 
     m = _RE_SECRET_ASSIGN.search(command)
     if m:
         val = m.group(2).strip("\"'")
-        if (len(val) > 8
-                and not val.startswith(('$', '{', 'http://', 'https://', '/'))
+        if val.startswith(('$(', '`')):
+            return (f"{m.group(1)} will be set from a secret source at runtime", "warn")
+        elif val.startswith('$') and len(val) > 1:
+            return (f"{m.group(1)} will expand a secret variable at runtime", "warn")
+        elif (len(val) > 8
+                and not val.startswith(('{', 'http://', 'https://', '/'))
                 and val.lower() not in _SAFE_PLACEHOLDERS):
-            return f"Command assigns a value to secret variable {m.group(1)}"
+            return (f"Command assigns a value to secret variable {m.group(1)}", "block")
 
     parts = command.split()
+
+    for i, part in enumerate(parts):
+        if part.lower() in _LONG_PASSWORD_FLAGS and i + 1 < len(parts):
+            next_val = parts[i + 1].strip("\"'")
+            if next_val.startswith('$'):
+                return (f"Password flag {part} will expand a secret variable at runtime", "warn")
+            elif not next_val.startswith('-') and next_val.lower() not in _SAFE_PLACEHOLDERS:
+                return (f"Password passed via CLI flag {part} (visible in process list and logs)", "block")
+        elif part.startswith(('--password=', '--pass=', '--passwd=', '--passphrase=')):
+            val = part.split('=', 1)[1].strip("\"'")
+            if val.startswith('$'):
+                return (f"Password flag will expand a secret variable at runtime", "warn")
+            elif val and val.lower() not in _SAFE_PLACEHOLDERS:
+                return (f"Password embedded in CLI flag (visible in process list and logs)", "block")
+
+    has_password_cmd = any(os.path.basename(p) in _SHORT_P_PASSWORD_COMMANDS for p in parts)
+    if has_password_cmd:
+        for i, part in enumerate(parts):
+            if part == '-p' and i + 1 < len(parts):
+                next_val = parts[i + 1].strip("\"'")
+                if next_val.startswith('$'):
+                    return ("Password flag -p will expand a secret variable at runtime", "warn")
+                elif not next_val.startswith('-') and next_val.lower() not in _SAFE_PLACEHOLDERS:
+                    return ("Password passed via -p flag (visible in process list and logs)", "block")
+
     if len(parts) > 1:
         for token in parts[1:]:
             clean = token.strip("\"'")
@@ -321,12 +385,12 @@ def _check_command_secrets(command):
                 ent = _shannon_entropy(clean)
                 _debug(f"entropy check: len={len(clean)} score={ent:.2f}")
                 if ent >= 3.5:
-                    return "Command contains a high-entropy string (possible secret)"
+                    return ("Command contains a high-entropy string (possible secret)", "block")
                 if ent >= 3.0:
                     unique_ratio = len(set(clean)) / len(clean)
                     max_freq = max(clean.count(c) for c in set(clean)) / len(clean)
                     if unique_ratio >= 0.4 and max_freq <= 0.15:
-                        return "Command contains a high-entropy string (possible padded secret)"
+                        return ("Command contains a high-entropy string (possible padded secret)", "block")
 
     return None
 
@@ -863,6 +927,32 @@ def block(reason):
     sys.exit(2)
 
 
+def warn(reason):
+    """Warn about potential secret exposure, prompting user to confirm."""
+    _debug(f"decision: WARN — {reason[:80]}")
+    _audit_log("warn", _ctx_tool, _ctx_summary, reason)
+    hint = "Use MCP servers or vault CLI in a subshell to avoid leaking secrets into chat."
+    reason_lower = reason.lower()
+    for pattern, h in _REMEDIATION_HINTS:
+        if pattern.lower() in reason_lower:
+            hint = h
+            break
+    output = {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "ask",
+            "permissionDecisionReason": (
+                f"SECRET LEAK WARNING: {reason}\n"
+                f"This command will expose a secret in chat history and session logs.\n"
+                f"Hint: {hint}\n"
+                f"Approve to proceed anyway, or reject to use a safer approach."
+            ),
+        }
+    }
+    json.dump(output, sys.stdout)
+    sys.exit(0)
+
+
 _SCANNABLE_TOOLS = frozenset({"Bash", "Read", "Edit", "Write"})
 
 _PASSTHROUGH_TOOLS = frozenset({
@@ -942,6 +1032,8 @@ def main():
                 if _is_sensitive_path(val):
                     sensitive_vars.add(m_assign.group(1))
 
+        secret_warnings = []
+
         for sub_cmd in sub_cmds:
             stripped = _strip_prefixes(sub_cmd)
             base_parts = _strip_wrappers(stripped.split())
@@ -949,10 +1041,15 @@ def main():
             if base_parts:
                 base = os.path.basename(base_parts[0])
                 if base not in _GREP_FAMILY:
-                    reason = _check_command_secrets(sub_cmd)
-                    if reason:
-                        _debug(f"secret match: {reason.split(':')[0] if ':' in reason else 'unknown category'}")
-                        block(f"BLOCKED: {reason}")
+                    result = _check_command_secrets(sub_cmd)
+                    if result:
+                        reason, level = result
+                        if level == "block":
+                            _debug(f"secret match: {reason.split(':')[0] if ':' in reason else 'unknown category'}")
+                            block(f"BLOCKED: {reason}")
+                        else:
+                            _debug(f"secret warning: {reason[:60]}")
+                            secret_warnings.append(reason)
 
             reason = _check_single_command_access(sub_cmd)
             if reason:
@@ -982,6 +1079,9 @@ def main():
                                 varname = clean[1:].split('/')[0]
                             if varname and varname in sensitive_vars:
                                 block(f"BLOCKED: Command accesses sensitive file via variable ${varname}")
+
+        if secret_warnings:
+            warn(secret_warnings[0])
 
     elif tool_name in ("Read", "Edit", "Write"):
         file_path = tool_input.get("file_path", "")
