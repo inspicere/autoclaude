@@ -10,7 +10,7 @@ import subprocess
 import os
 import sys
 
-HOOK = '/home/terrabot/autoclaude/hooks/block-secrets.py'
+HOOK = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'block-secrets.py')
 HOME = os.path.expanduser('~')
 results = {'pass': 0, 'fail': 0, 'failures': []}
 

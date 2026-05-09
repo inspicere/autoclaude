@@ -4,7 +4,7 @@ import subprocess
 import json
 import os
 
-HOOK = os.path.expanduser("~/autoclaude/hooks/block-secrets.py")
+HOOK = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'block-secrets.py')
 
 tests = [
     # (description, command, expected_decision)
