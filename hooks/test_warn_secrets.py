@@ -53,6 +53,92 @@ def main():
     print('\n=== PostToolUse: Ignored tools ===')
     results.append(test_hook('Write', {'file_path': '/tmp/x'}, fake_token, False))
 
+    # === PostToolUse: Correlation with PreToolUse warns ===
+    print('\n=== PostToolUse: Correlation with PreToolUse warns ===')
+
+    audit_log = os.path.expanduser('~/.claude/hook-audit.jsonl')
+    os.makedirs(os.path.dirname(audit_log), exist_ok=True)
+
+    import time
+    ts_now = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+
+    # Write a fake warn audit entry
+    warn_record = json.dumps({
+        "ts": ts_now, "decision": "warn", "tool": "Bash",
+        "reason": "FORGEJO_TOKEN will be set from a secret source at runtime",
+        "command": "FORGEJO_TOKEN=$(vault kv get -field=api_token secret/forgejo) && curl http://x"
+    })
+
+    # Save existing audit log
+    orig_content = None
+    try:
+        with open(audit_log, 'r') as f:
+            orig_content = f.read()
+    except FileNotFoundError:
+        pass
+
+    # Write test entry
+    with open(audit_log, 'a') as f:
+        f.write(warn_record + "\n")
+
+    # Test: output with high-entropy string should trigger correlation
+    high_entropy_output = "result: aB3xK9mZ2pQ7wR4vY1nL8cF5hD6jE0sT"
+    data = json.dumps({
+        'tool_name': 'Bash',
+        'tool_input': {'command': 'curl http://example.com'},
+        'tool_result': high_entropy_output,
+    })
+    r = subprocess.run(
+        ['python3', HOOK], input=data, capture_output=True, text=True,
+        timeout=10, env=dict(os.environ, HOOK_CORRELATE='1')
+    )
+    warned = bool(r.stdout.strip())
+    ok = warned
+    results.append(ok)
+    print(f"{'PASS' if ok else 'FAIL'} [WARN] Correlation: high-entropy output after warn")
+    if not ok:
+        print(f"       stdout={r.stdout.strip()[:100]}")
+
+    # Test: output without high-entropy string should not trigger
+    data = json.dumps({
+        'tool_name': 'Bash',
+        'tool_input': {'command': 'curl http://example.com'},
+        'tool_result': 'HTTP 200 OK\n{"status": "success"}',
+    })
+    r = subprocess.run(
+        ['python3', HOOK], input=data, capture_output=True, text=True,
+        timeout=10, env=dict(os.environ, HOOK_CORRELATE='1')
+    )
+    warned = bool(r.stdout.strip())
+    ok = not warned
+    results.append(ok)
+    print(f"{'PASS' if ok else 'FAIL'} [ALLOW] Correlation: low-entropy output after warn")
+
+    # Test: HOOK_CORRELATE=0 disables correlation
+    data = json.dumps({
+        'tool_name': 'Bash',
+        'tool_input': {'command': 'curl http://example.com'},
+        'tool_result': high_entropy_output,
+    })
+    r = subprocess.run(
+        ['python3', HOOK], input=data, capture_output=True, text=True,
+        timeout=10, env=dict(os.environ, HOOK_CORRELATE='0')
+    )
+    warned = bool(r.stdout.strip())
+    ok = not warned
+    results.append(ok)
+    print(f"{'PASS' if ok else 'FAIL'} [ALLOW] Correlation disabled with HOOK_CORRELATE=0")
+
+    # Restore original audit log
+    if orig_content is not None:
+        with open(audit_log, 'w') as f:
+            f.write(orig_content)
+    else:
+        try:
+            os.unlink(audit_log)
+        except FileNotFoundError:
+            pass
+
     print()
     passed = sum(results)
     total = len(results)

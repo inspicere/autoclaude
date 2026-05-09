@@ -18,8 +18,10 @@ Outputs JSON with decision/reason on detection. Exits 0 always.
 
 import json
 import math
+import os
 import re
 import sys
+import time
 
 
 _PREFIXED_TOKEN_PATTERNS = re.compile(
@@ -95,6 +97,84 @@ def _scan_output(text):
     return findings
 
 
+_AUDIT_LOG = os.path.join(os.path.expanduser("~"), ".claude", "hook-audit.jsonl")
+_CORRELATE = os.environ.get("HOOK_CORRELATE", "1") == "1"
+_RE_VAR_FROM_REASON = re.compile(r'^(\w+) will (?:be set|expand)')
+
+
+def _read_recent_warns(max_age_seconds=10):
+    """Read recent warn entries from the PreToolUse audit log."""
+    try:
+        size = os.path.getsize(_AUDIT_LOG)
+    except OSError:
+        return []
+    read_bytes = min(size, 50_000)
+    warns = []
+    now = time.time()
+    try:
+        with open(_AUDIT_LOG, "r") as f:
+            if read_bytes < size:
+                f.seek(size - read_bytes)
+                f.readline()
+            for line in f:
+                try:
+                    rec = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                if rec.get("decision") != "warn":
+                    continue
+                try:
+                    ts_str = rec["ts"]
+                    if "+" in ts_str or ts_str.endswith("Z"):
+                        from datetime import datetime, timezone
+                        dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                        rec_time = dt.timestamp()
+                    else:
+                        rec_time = time.mktime(time.strptime(
+                            ts_str[:19], "%Y-%m-%dT%H:%M:%S"))
+                except (KeyError, ValueError, OverflowError):
+                    continue
+                if now - rec_time <= max_age_seconds:
+                    warns.append(rec)
+    except OSError:
+        pass
+    return warns
+
+
+def _extract_variable_names(warn_records):
+    """Extract variable names from warn reason strings and commands."""
+    names = set()
+    for rec in warn_records:
+        reason = rec.get("reason", "")
+        m = _RE_VAR_FROM_REASON.match(reason)
+        if m:
+            names.add(m.group(1))
+        cmd = rec.get("command", "")
+        for m2 in re.finditer(r'\b(\w+)=\$\(', cmd):
+            names.add(m2.group(1))
+    return names
+
+
+def _check_output_for_expanded_secrets(text, variable_names):
+    """Check output for high-entropy strings that could be expanded secrets."""
+    if not variable_names:
+        return []
+    findings = []
+    for token in text.split():
+        clean = token.strip("\"',;:()[]{}|")
+        if len(clean) < 16:
+            continue
+        if clean.startswith(("/", ".", "~", "http")):
+            continue
+        ent = _shannon_entropy(clean)
+        if ent >= 3.5:
+            findings.append(
+                f"High-entropy value in output (possible expanded secret from "
+                f"flagged variable {'/'.join(sorted(variable_names)[:3])})")
+            break
+    return findings
+
+
 def main():
     try:
         data = json.load(sys.stdin)
@@ -126,6 +206,14 @@ def main():
         result = str(result)
 
     findings = _scan_output(result)
+
+    if not findings and _CORRELATE:
+        recent_warns = _read_recent_warns()
+        if recent_warns:
+            var_names = _extract_variable_names(recent_warns)
+            correlated = _check_output_for_expanded_secrets(result, var_names)
+            findings.extend(correlated)
+
     if not findings:
         sys.exit(0)
 

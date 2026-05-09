@@ -118,6 +118,55 @@ for desc, cmd, expected in tests:
         continue
     print(f"  {status}: {desc}")
 
+# --- Confidence grading tests ---
+# These check that warn messages contain confidence-appropriate text
+confidence_tests = [
+    ("echo $TOKEN is high confidence",
+     'SECRET_TOKEN=$(vault kv get secret/x) && echo $SECRET_TOKEN',
+     "likely to expose"),
+    ("curl -H auth is low confidence",
+     'curl -s -H "Authorization: Token $(grep API_KEY /tmp/test | cut -d= -f2)" http://example.com',
+     "may expose"),
+    ("curl -u is low confidence",
+     'curl -u admin:$DB_PASSWORD http://example.com/api',
+     "may expose"),
+    ("--password is low confidence",
+     'mysql --password=$DB_PASS -u admin mydb',
+     "may expose"),
+    ("printf $TOKEN is high confidence",
+     'API_KEY=$(vault kv get secret/x) && printf "%s" $API_KEY',
+     "likely to expose"),
+    ("output to /dev/null is low confidence",
+     'SECRET_TOKEN=$(vault kv get secret/x) && curl -o /dev/null -H "Auth: $SECRET_TOKEN" http://x',
+     "may expose"),
+]
+
+for desc, cmd, expected_phrase in confidence_tests:
+    inp = json.dumps({"tool_name": "Bash", "tool_input": {"command": cmd}})
+    result = subprocess.run(
+        ["python3", HOOK],
+        input=inp, capture_output=True, text=True
+    )
+    try:
+        data = json.loads(result.stdout)
+        reason = data["hookSpecificOutput"]["permissionDecisionReason"]
+        ok = expected_phrase in reason
+    except (json.JSONDecodeError, KeyError):
+        ok = False
+        reason = ""
+
+    status = "PASS" if ok else "FAIL"
+    if ok:
+        passed += 1
+    else:
+        failed += 1
+        print(f"  {status}: {desc}")
+        print(f"         expected phrase '{expected_phrase}' in reason")
+        if reason:
+            print(f"         got: {reason[:120]}")
+        continue
+    print(f"  {status}: {desc}")
+
 print(f"\nResults: {passed}/{passed + failed} passed")
 if failed:
     print(f"FAILURES: {failed}")
