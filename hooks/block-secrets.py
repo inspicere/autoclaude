@@ -1054,12 +1054,14 @@ def main():
         _ctx_summary = f"{first_word} ({len(command)} chars)"
         _ctx_command = command
 
-        sub_cmds = _split_shell_commands(command)
-        for m in _RE_COMMAND_SUBST.finditer(command):
+        command_for_scan = _strip_quoted_heredocs(command)
+
+        sub_cmds = _split_shell_commands(command_for_scan)
+        for m in _RE_COMMAND_SUBST.finditer(command_for_scan):
             sub_cmds.extend(_split_shell_commands(m.group(1)))
-        for m in _RE_PROC_SUBST.finditer(command):
+        for m in _RE_PROC_SUBST.finditer(command_for_scan):
             sub_cmds.extend(_split_shell_commands(m.group(1)))
-        for m in _RE_BACKTICK_SUBST.finditer(command):
+        for m in _RE_BACKTICK_SUBST.finditer(command_for_scan):
             sub_cmds.extend(_split_shell_commands(m.group(1)))
 
         _HEREDOC_SHELLS = _INTERPRETERS | {'bash', 'sh', 'zsh', 'dash', 'ksh'}
