@@ -68,7 +68,7 @@ PreToolUse correlation (`HOOK_CORRELATE=1`, on by default): after standard patte
 
 ## Reference settings (`settings/recommended-deny.json`)
 
-60 baseline deny patterns for Read/Write/Edit plus a hook config template. The `BASELINE_DENY_RULES` list in the main script mirrors this file — they should be kept in sync.
+10 safe-to-allow patterns (read-only Bash builtins + the built-in `Grep` tool), 60 deny patterns for Read/Write/Edit, plus a hook config template. The `BASELINE_SAFE_ALLOW` and `BASELINE_DENY_RULES` lists in the main script mirror this file and should be kept in sync.
 
 ## Documentation (`docs/`)
 
