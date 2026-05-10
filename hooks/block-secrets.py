@@ -194,6 +194,14 @@ _FILE_COPIERS = frozenset({
 _COMMAND_WRAPPERS = frozenset({
     'sudo', 'env', 'time', 'nice', 'timeout', 'nohup', 'command', 'busybox',
     'stdbuf', 'ionice', 'numactl', 'taskset', 'chrt',
+    # Round 3 additions
+    'setsid', 'flock', 'unshare', 'coproc', 'watch',
+})
+
+_DANGEROUS_ENV_VARS = frozenset({
+    'BASH_ENV', 'ENV', 'ZDOTDIR', 'PYTHONSTARTUP', 'RUBYOPT',
+    'PERL5OPT', 'PERL5LIB', 'NODE_OPTIONS', 'LD_PRELOAD',
+    'LD_LIBRARY_PATH',
 })
 
 _INTERPRETERS = frozenset({
@@ -599,9 +607,10 @@ def _split_shell_commands(command):
 
 
 def _strip_prefixes(cmd):
-    """Strip cd and env-var prefixes from a command."""
+    """Strip cd, env-var, and shell keyword prefixes from a command."""
     cmd = re.sub(r'^(cd\s+(?:\S+|"[^"]*"|\'[^\']*\')\s*&&\s*)+', '', cmd.strip())
     cmd = re.sub(r'^(\w+=(?:\S+|"[^"]*"|\'[^\']*\')\s+)+', '', cmd)
+    cmd = re.sub(r'^(?:do|then|else|elif)\s+', '', cmd)
     return cmd
 
 
@@ -643,8 +652,50 @@ def _strip_wrappers(parts):
                 idx += 1
         elif base == 'env':
             idx += 1
-            while idx < len(parts) and (parts[idx].startswith('-') or '=' in parts[idx]):
+            while idx < len(parts):
+                arg = parts[idx]
+                if arg in ('-S', '--split-string'):
+                    break
+                if arg.startswith('-S') and len(arg) > 2:
+                    break
+                if arg.startswith('--split-string='):
+                    break
+                if arg.startswith('-') or '=' in arg:
+                    idx += 1
+                else:
+                    break
+        elif base == 'setsid':
+            idx += 1
+            while idx < len(parts) and parts[idx].startswith('-'):
                 idx += 1
+        elif base == 'flock':
+            idx += 1
+            _FLOCK_VALUE_FLAGS = frozenset({'-w', '--timeout', '-E', '--conflict-exit-code'})
+            while idx < len(parts) and parts[idx].startswith('-'):
+                if parts[idx] in _FLOCK_VALUE_FLAGS:
+                    idx += 2
+                else:
+                    idx += 1
+            if idx < len(parts):
+                idx += 1
+        elif base == 'unshare':
+            idx += 1
+            while idx < len(parts) and parts[idx].startswith('-'):
+                idx += 1
+        elif base == 'coproc':
+            idx += 1
+            if idx < len(parts):
+                maybe = os.path.basename(parts[idx])
+                _KNOWN_CMDS = _FILE_READERS | _FILE_COPIERS | _INTERPRETERS | _GREP_FAMILY | {'eval', 'exec', 'git', 'docker', 'xargs', 'make', 'ssh', 'dd'}
+                if maybe not in _KNOWN_CMDS and not parts[idx].startswith('/') and not parts[idx].startswith('-'):
+                    idx += 1
+        elif base == 'watch':
+            idx += 1
+            while idx < len(parts) and parts[idx].startswith('-'):
+                flag = parts[idx]
+                idx += 1
+                if flag in ('-n', '--interval') and idx < len(parts) and not parts[idx].startswith('-'):
+                    idx += 1
         else:
             break
     return parts[idx:]
@@ -669,9 +720,54 @@ def _check_sensitive_paths_in_text(text):
     return None
 
 
+def _check_env_split_string(cmd):
+    """Check env -S/--split-string for wrapped blocked commands."""
+    if not re.search(r'\benv\b', cmd):
+        return None
+    for pat in [
+        re.compile(r'--split-string=(["\'])(.+?)\1', re.DOTALL),
+        re.compile(r'--split-string=(\S+)'),
+        re.compile(r'--split-string\s+(["\'])(.+?)\1', re.DOTALL),
+        re.compile(r'-S(["\'])(.+?)\1', re.DOTALL),
+        re.compile(r'-S\s+(["\'])(.+?)\1', re.DOTALL),
+        re.compile(r'-S(\S+)'),
+    ]:
+        m = pat.search(cmd)
+        if m:
+            inner = m.group(m.lastindex)
+            if inner:
+                result = _check_single_command_access(inner)
+                if result:
+                    return result
+                sensitive = _check_sensitive_paths_in_text(inner)
+                if sensitive:
+                    return f"env --split-string references sensitive file: {sensitive}"
+            return None
+    return None
+
+
+def _check_dangerous_env_prefixes(cmd):
+    """Check if env-var prefixes use dangerous auto-sourcing variables with sensitive paths."""
+    m = re.match(r'^(\w+=(?:\S+|"[^"]*"|\'[^\']*\')\s+)+', cmd.strip())
+    if not m:
+        return None
+    prefix = m.group(0)
+    for assign in re.finditer(r'(\w+)=((?:[^\s"\']+|"[^"]*"|\'[^\']*\'))', prefix):
+        var_name = assign.group(1)
+        val = assign.group(2).strip("\"'")
+        if var_name in _DANGEROUS_ENV_VARS and _is_sensitive_path(val):
+            return f"Dangerous env var {var_name} references sensitive file: {val}"
+    return None
+
+
 def _check_single_command_access(command):
     """Check if a single shell command (no pipes/chains) accesses sensitive files."""
     cmd = _strip_prefixes(command)
+
+    r = _check_env_split_string(cmd)
+    if r:
+        return f"env --split-string wraps blocked command: {r}"
+
     parts = cmd.split()
     if not parts:
         return None
@@ -732,8 +828,25 @@ def _check_single_command_access(command):
             '-name', '-iname', '-path', '-ipath', '-regex', '-iregex',
             '-wholename', '-iwholename', '-lname', '-ilname',
         })
+        _FIND_EXEC_FLAGS = frozenset({'-exec', '-execdir', '-ok', '-okdir'})
         skip_next = False
+        in_exec = False
+        exec_cmd_parts = []
         for arg in parts[1:]:
+            if in_exec:
+                if arg in (r'\;', '+', ';'):
+                    if exec_cmd_parts:
+                        exec_base = os.path.basename(exec_cmd_parts[0])
+                        if exec_base in _FILE_READERS | _FILE_COPIERS:
+                            return f"find -exec invokes file-reading command: {exec_base}"
+                    in_exec = False
+                    exec_cmd_parts = []
+                else:
+                    exec_cmd_parts.append(arg)
+                continue
+            if arg in _FIND_EXEC_FLAGS:
+                in_exec = True
+                continue
             if skip_next:
                 skip_next = False
                 continue
@@ -744,6 +857,10 @@ def _check_single_command_access(command):
                 continue
             if _is_sensitive_path(arg):
                 return f"Command accesses sensitive file: {arg}"
+        if in_exec and exec_cmd_parts:
+            exec_base = os.path.basename(exec_cmd_parts[0])
+            if exec_base in _FILE_READERS | _FILE_COPIERS:
+                return f"find -exec invokes file-reading command: {exec_base}"
 
     if base == 'dd':
         for arg in parts[1:]:
@@ -774,6 +891,16 @@ def _check_single_command_access(command):
                         path = arg[len(prefix):]
                         if _is_sensitive_path(path):
                             return f"Command reads sensitive file via wget: {arg}"
+
+    if base == 'git' and len(parts) > 1:
+        _GIT_FILE_SUBCMDS = frozenset({'diff', 'hash-object', 'add', 'archive'})
+        sub = parts[1] if not parts[1].startswith('-') else ''
+        if sub in _GIT_FILE_SUBCMDS:
+            for arg in parts[2:]:
+                if arg.startswith('-') or arg == '/dev/null':
+                    continue
+                if _is_sensitive_path(arg):
+                    return f"git {sub} accesses sensitive file: {arg}"
 
     if base in ('tar', 'zip'):
         for arg in parts[1:]:
@@ -812,8 +939,11 @@ def _check_single_command_access(command):
         remaining = [a for a in parts[1:] if not a.startswith('-')]
         if remaining:
             xargs_cmd = remaining[0]
-            if os.path.basename(xargs_cmd) in _FILE_READERS | _FILE_COPIERS:
+            xargs_base = os.path.basename(xargs_cmd)
+            if xargs_base in _FILE_READERS | _FILE_COPIERS:
                 return f"xargs invokes file-reading command: {xargs_cmd}"
+            if xargs_base in ('sh', 'bash', 'zsh', 'dash', 'ksh'):
+                return f"xargs pipes to shell interpreter: {xargs_base}"
 
     if base == 'make':
         for arg in parts[1:]:
@@ -1079,6 +1209,7 @@ def main():
         # Variable-indirection tracking: find VAR=sensitive_path assignments,
         # then flag any command that uses $VAR or ${VAR} as an argument.
         _RE_VAR_ASSIGN = re.compile(r'^(?:export\s+)?(\w+)=(\S+)')
+        _RE_FOR_LOOP = re.compile(r'^for\s+(\w+)\s+in\s+(.*)')
         sensitive_vars = set()
         for sub_cmd in sub_cmds:
             m_assign = _RE_VAR_ASSIGN.match(sub_cmd.strip())
@@ -1086,10 +1217,20 @@ def main():
                 val = m_assign.group(2).strip("\"'")
                 if _is_sensitive_path(val):
                     sensitive_vars.add(m_assign.group(1))
+            m_for = _RE_FOR_LOOP.match(sub_cmd.strip())
+            if m_for:
+                for token in m_for.group(2).split():
+                    if _is_sensitive_path(token.strip("\"';")):
+                        sensitive_vars.add(m_for.group(1))
+                        break
 
         secret_warnings = []
 
         for sub_cmd in sub_cmds:
+            env_reason = _check_dangerous_env_prefixes(sub_cmd)
+            if env_reason:
+                block(f"BLOCKED: {env_reason}")
+
             stripped = _strip_prefixes(sub_cmd)
             base_parts = _strip_wrappers(stripped.split())
 
