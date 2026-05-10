@@ -1,6 +1,6 @@
 # Example Reports
 
-Real output from a homelab infrastructure environment running 10+ projects with ~39k tool calls over 33 days (April-May 2026).
+Real output from a homelab infrastructure environment running 10+ projects with ~40k tool calls over 33 days (April-May 2026).
 
 ## Trend
 
@@ -22,30 +22,30 @@ CLAUDE CODE TREND ANALYSIS (by day)
   2026-04-28       106      98        8 ↓    0  92.5%  85.2%      0      48      58    0
   2026-04-29       980     819      161 ↑    0  83.6%  84.9%     12     497     468    5
   2026-04-30     1,591   1,343      248 ↑    0  84.4%  86.2%     21     425   1,145   18
-  2026-05-01     4,389   3,636      753 ↑    0  82.8%  85.6%     92   1,533   2,763   87
-  2026-05-02     3,416   2,927      489 ↓    0  85.7%  85.8%     58   1,434   1,924   17
-  2026-05-03     4,407   3,635      771 ↑    1  82.5%  85.6%    118   1,989   2,295  113
+  2026-05-01     4,389   3,636      753 ↑    0  82.8%  85.6%     92   1,533   2,763   86
+  2026-05-02     3,416   2,927      489 ↓    0  85.7%  85.8%     58   1,434   1,924   16
+  2026-05-03     4,407   3,635      771 ↑    1  82.5%  85.6%    118   1,989   2,295  110
   2026-05-04     1,798   1,419      379 ↓    0  78.9%  84.3%     26     850     917   45
   2026-05-05     1,388   1,268      120 ↓    0  91.4%  84.2%     24     695     668    6
-  2026-05-06     3,759   3,308      451 ↑    0  88.0%  84.8%     61   1,370   2,313   48
-  2026-05-07     2,753   2,214      539 ↑    0  80.4%  84.2%     67   1,324   1,355   21
-  2026-05-08     5,724   4,991      733 ↑    0  87.2%  84.9%     19   2,042   3,620   10
-  2026-05-09     3,760   3,193      567 ↓    0  84.9%  84.8%     56   1,925   1,756    8
-  2026-05-10     2,485   2,139      346 ↓    0  86.1%  85.3%     39   1,155   1,265   11
+  2026-05-06     3,759   3,311      448 ↑    0  88.1%  84.8%     61   1,370   2,313   44
+  2026-05-07     2,753   2,230      523 ↑    0  81.0%  84.3%     67   1,324   1,355   13
+  2026-05-08     5,724   5,000      724 ↑    0  87.4%  85.0%     19   2,042   3,620   10
+  2026-05-09     3,760   3,196      564 ↓    0  85.0%  84.9%     56   1,925   1,756    7
+  2026-05-10     3,296   2,857      439 ↓    0  86.7%  85.5%     55   1,549   1,666    3
   ------------ ------- ------- ---------- ---- ------ ------ ------- ------- ------- ----
-  TOTAL         38,890  32,912      5,977    1  84.6%      -    615  16,583  21,555  410
+  TOTAL         39,701  33,661      6,039    1  84.8%      -    631  16,977  21,956  384
 
-  Auto-allow rate: 83.3% (2026-04-08) -> 86.1% (2026-05-10), up 2.7pp
-  Prompts: 50 (2026-04-08) -> 346 (2026-05-10), +592%
+  Auto-allow rate: 83.3% (2026-04-08) -> 86.7% (2026-05-10), up 3.3pp
+  Prompts: 50 (2026-04-08) -> 439 (2026-05-10), +778%
 ```
 
 ## Summary
 
 ```
 CLAUDE CODE APPROVAL SUMMARY
-  Calls: 38,891 total | 32,913 auto | 5,977 prompted | 1 rejected
-  Risk:  615 destructive | 16,584 mutating | 21,555 read-only | 137 unknown
-  Secrets: 410 secret-exposure commands approved
+  Calls: 39,702 total | 33,662 auto | 6,039 prompted | 1 rejected
+  Risk:  631 destructive | 16,978 mutating | 21,956 read-only | 137 unknown
+  Secrets: 384 secret-exposure commands approved
   WARNING: These secrets are already written to disk in session JSONL files
   (~/.claude/projects/) and were sent to the Claude API. They should be
   rotated and considered compromised.
@@ -67,18 +67,19 @@ CLAUDE CODE APPROVAL SUMMARY
 
 ```
 ==========================================================================================
-  SECRET EXPOSURE ANALYSIS - 663 flagged command(s)
+  SECRET EXPOSURE ANALYSIS - 678 flagged command(s)
 ==========================================================================================
 
   By exposure risk:
-    EXPOSED  - literal secret in command text (in transcript)      410
+    EXPOSED  - literal secret in command text (in transcript)      384
     RUNTIME  - secret fetched via $(), may appear in output         30
-    VARIABLE - secret referenced via $VAR, may appear in output    161
-    PIPE-SAFE - secret flows through pipe, never in transcript      62
+    VARIABLE - secret referenced via $VAR, may appear in output    173
+    PIPE-SAFE - secret flows through pipe, never in transcript      64
+    FALSE-POS - not actually a secret (git hash, public key, test data)    27
 
   By detection category:
-    Authorization header                                 287
-    High-entropy blob                                    167
+    Authorization header                                 301
+    High-entropy blob                                    168
     Secret variable assignment                           159
     Known token pattern (ghp_, hvs., sk-, etc.)           36
     JWT token                                             13

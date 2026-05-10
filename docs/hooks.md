@@ -51,12 +51,32 @@ Blocks commands that read sensitive paths (`.env*`, `.ssh/id_*`, `.aws/credentia
 | Long-form file flags (`--from-file=`, `-in`) | Checks flag values |
 | Command wrappers (`sudo`, `env`, `stdbuf`, etc.) | Strips and re-checks |
 
+### Quoted heredoc handling
+
+Heredoc bodies with quoted delimiters (`<< 'EOF'` or `<< "EOF"`) are stripped before secret scanning. The shell does not expand variables inside these bodies, so `TOKEN=$(vault kv get ...)` in a quoted heredoc is a literal string written to a file, not a secret exposure.
+
+Unquoted heredocs (`<< EOF`) still trigger detection because the shell expands variables in them at runtime.
+
+### False-positive filtering
+
+The report script's `--secrets` mode classifies flagged commands through `_classify_exposure_risk()`, which identifies false positives:
+
+- Git object hashes (7-40 hex chars in git commands)
+- SSH public keys (`ssh-ed25519 AAAA...`)
+- Non-secret variable assignments (`GIT_AUTHOR_NAME`, `HOME`, `PATH`, etc.)
+- Git ref paths (`refs/original/`, `refs/heads/`)
+- Test/dummy Basic auth credentials (base64-decoded value contains `test`, `dummy`, `wrong`, `changeme`)
+- Test payload patterns (`json.dumps`, `tool_result`, `echo ... tool_name`)
+
+These appear as `FALSE-POS` in the secrets report and are excluded from the Sec count in trend output.
+
 ### What passes through
 
 - Grep-family commands (searching for patterns, not using secrets)
 - Variable *references* (`$TOKEN`, `${VAR}`) without literal values
 - URLs in assignments (`CALLBACK=https://...`)
 - Short/placeholder values (`PASSWORD=changeme`)
+- Quoted heredoc bodies (no variable expansion)
 - Normal file operations on non-sensitive paths
 
 ### Configuration
