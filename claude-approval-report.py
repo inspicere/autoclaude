@@ -758,9 +758,14 @@ def _classify_exposure_risk(cmd, category):
 
     if category == "auth_header":
         m = re.search(
-            r'(?:Bearer|Token|Basic)\s+(\S+)',
+            r'Authorization:\s*(?:Bearer|Token|Basic)\s+(\S+)',
             cmd, re.IGNORECASE
         )
+        if not m:
+            m = re.search(
+                r'-H\s+["\']Authorization:\s*(?:Bearer|Token|Basic)\s+(\S+)',
+                cmd, re.IGNORECASE
+            )
         if m:
             val = m.group(1).strip("\"'")
             if val.startswith('$(') or val.startswith('`'):
