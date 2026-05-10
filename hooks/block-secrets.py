@@ -38,6 +38,8 @@ def _audit_log(decision, tool_name, summary="", reason="", command="",
     """Append a structured JSON record to the audit log."""
     if not _AUDIT:
         return
+    if decision == "block" and command:
+        command = _PREFIXED_TOKEN_PATTERNS.sub('<REDACTED>', command)[:200]
     record = {
         "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "decision": decision,
@@ -52,8 +54,17 @@ def _audit_log(decision, tool_name, summary="", reason="", command="",
     if confidence:
         record["confidence"] = confidence
     try:
-        with open(_AUDIT_LOG, "a") as f:
-            f.write(json.dumps(record, separators=(",", ":")) + "\n")
+        try:
+            if os.path.getsize(_AUDIT_LOG) > 5_000_000:
+                os.replace(_AUDIT_LOG, _AUDIT_LOG + ".1")
+        except OSError:
+            pass
+        line = json.dumps(record, separators=(",", ":")) + "\n"
+        fd = os.open(_AUDIT_LOG, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        try:
+            os.write(fd, line.encode())
+        finally:
+            os.close(fd)
     except OSError:
         pass
 

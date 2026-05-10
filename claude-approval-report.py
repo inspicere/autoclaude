@@ -657,6 +657,8 @@ def process_session(jsonl_path, allow_patterns, project_name):
                 redacted_input = dict(tool_input)
                 redacted_input["command"] = redact_secrets(tool_input["command"])
 
+            original_cmd = tool_input.get("command", "") if tool_name == "Bash" else ""
+
             records.append({
                 "project": project_name,
                 "session": os.path.basename(jsonl_path),
@@ -669,6 +671,7 @@ def process_session(jsonl_path, allow_patterns, project_name):
                 "risk": risk,
                 "timestamp": obj.get("timestamp", ""),
                 "_has_secrets": has_secrets,
+                "_original_command": original_cmd,
             })
 
     return records
@@ -702,7 +705,7 @@ def _find_secret_exposures(records):
 
     Returns list of (record, category) tuples where category is one of:
     token, jwt, private_key, auth_header, secret_assign, high_entropy.
-    Uses pre-computed _has_secrets flag and redacted command for categorization.
+    Uses _original_command (unredacted) for accurate categorization.
     """
     results = []
     for r in records:
@@ -713,7 +716,7 @@ def _find_secret_exposures(records):
         if not r.get("_has_secrets"):
             continue
 
-        cmd = r["tool_input"].get("command", "")
+        cmd = r.get("_original_command", r["tool_input"].get("command", ""))
         if _PREFIXED_TOKEN_PATTERNS.search(cmd):
             results.append((r, "token"))
         elif _RE_JWT.search(cmd):
@@ -733,6 +736,59 @@ def _find_secret_exposures(records):
 def _count_secret_exposures(records):
     """Count records where secrets were exposed in command arguments."""
     return len(_find_secret_exposures(records))
+
+
+def _classify_exposure_risk(cmd, category):
+    """Classify whether a secret-flagged command actually exposes the secret.
+
+    Returns (risk_level, explanation) where risk_level is one of:
+    - "exposed": literal secret value appears in command text (in transcript)
+    - "variable": secret referenced via $VAR — value may appear in output
+    - "pipe-safe": secret flows through pipe, never appears in transcript
+    - "runtime": secret fetched at runtime via $(), may or may not leak
+    """
+    if category == "token":
+        return ("exposed", "Literal token in command text")
+    if category == "jwt":
+        return ("exposed", "Literal JWT in command text")
+    if category == "private_key":
+        return ("exposed", "Private key material in command text")
+    if category == "high_entropy":
+        return ("exposed", "High-entropy blob in command text")
+
+    if category == "auth_header":
+        m = re.search(
+            r'(?:Bearer|Token|Basic)\s+(\S+)',
+            cmd, re.IGNORECASE
+        )
+        if m:
+            val = m.group(1).strip("\"'")
+            if val.startswith('$(') or val.startswith('`'):
+                return ("runtime", f"Auth value from subshell — secret fetched at runtime")
+            if val.startswith('$') or val.startswith('${'):
+                if '|' in cmd and '$(' not in cmd:
+                    return ("pipe-safe", f"Auth value {val} — pipe-only, no transcript exposure")
+                return ("variable", f"Auth value {val} — variable ref, may appear in output")
+            if val in ('{}', '{0}') and '|' in cmd:
+                return ("pipe-safe", f"Auth value from xargs/pipe — never in transcript")
+            return ("exposed", "Literal auth credential in command text")
+        return ("exposed", "Auth header with literal value")
+
+    if category == "secret_assign":
+        m = _RE_SECRET_ASSIGN.search(cmd)
+        if m:
+            var_name = m.group(1)
+            val = m.group(2).strip("\"'")
+            if val.startswith('$(') or val.startswith('`'):
+                if '|' in cmd and re.search(r'\|\s*\w', cmd):
+                    return ("pipe-safe", f"{var_name}=$(...) piped — secret stays in pipeline")
+                return ("runtime", f"{var_name} set from subshell — may appear in output")
+            if val.startswith('$') or val.startswith('${'):
+                return ("variable", f"{var_name} set from variable {val}")
+            return ("exposed", f"Literal value assigned to {var_name}")
+        return ("exposed", "Secret assignment with literal value")
+
+    return ("exposed", "Unknown pattern")
 
 
 SECRET_WARNING = (
@@ -1611,6 +1667,109 @@ def render_generate_settings(all_records, out=None):
     out.write("\n")
 
 
+def render_secrets(all_records, out=None):
+    """Detailed report of all secret-flagged commands with exposure analysis."""
+    if out is None:
+        out = sys.stdout
+    _print = lambda *args, **kwargs: print(*args, file=out, **kwargs)
+
+    exposures = _find_secret_exposures(all_records)
+    if not exposures:
+        _print("No secret-flagged commands found.")
+        return
+
+    _print(f"\n{'='*90}")
+    _print(f"  SECRET EXPOSURE ANALYSIS — {len(exposures)} flagged command(s)")
+    _print(f"{'='*90}\n")
+
+    by_risk = Counter()
+    by_category = Counter()
+    by_project = Counter()
+    rows = []
+
+    for r, category in exposures:
+        cmd = r.get("_original_command", r["tool_input"].get("command", ""))
+        risk_level, explanation = _classify_exposure_risk(cmd, category)
+        by_risk[risk_level] += 1
+        by_category[category] += 1
+        by_project[short_project_name(r["project"])] += 1
+        rows.append((r, category, risk_level, explanation))
+
+    # Summary
+    _print(f"  By exposure risk:")
+    risk_order = ["exposed", "runtime", "variable", "pipe-safe"]
+    risk_labels = {
+        "exposed": "EXPOSED  — literal secret in command text (in transcript)",
+        "runtime": "RUNTIME  — secret fetched via $(), may appear in output",
+        "variable": "VARIABLE — secret referenced via $VAR, may appear in output",
+        "pipe-safe": "PIPE-SAFE — secret flows through pipe, never in transcript",
+    }
+    for risk in risk_order:
+        count = by_risk.get(risk, 0)
+        if count:
+            _print(f"    {risk_labels[risk]:60s} {count:>5}")
+    _print()
+
+    _print(f"  By detection category:")
+    cat_labels = {
+        "token": "Known token pattern (ghp_, hvs., sk-, etc.)",
+        "jwt": "JWT token",
+        "private_key": "Private key material",
+        "auth_header": "Authorization header",
+        "secret_assign": "Secret variable assignment",
+        "high_entropy": "High-entropy blob",
+    }
+    for cat, count in by_category.most_common():
+        _print(f"    {cat_labels.get(cat, cat):50s} {count:>5}")
+    _print()
+
+    _print(f"  By project:")
+    for proj, count in by_project.most_common():
+        _print(f"    {proj:50s} {count:>5}")
+    _print()
+
+    # Detailed listing
+    _print(f"  {'—'*86}")
+    _print(f"  {'Timestamp':<18s} {'Risk':<10s} {'Category':<14s} {'Project':<14s} Command")
+    _print(f"  {'—'*86}")
+
+    for r, category, risk_level, explanation in rows:
+        ts = r.get("timestamp", "")
+        try:
+            dt = datetime.fromisoformat(ts)
+            time_display = dt.strftime("%Y-%m-%d %H:%M")
+        except (ValueError, TypeError):
+            time_display = ts[:16] if ts else "?"
+
+        project = short_project_name(r["project"])
+        cmd = r.get("full_command", r["tool_input"].get("command", ""))
+        cmd_display = cmd.replace('\n', ' ')[:60]
+
+        risk_tag = {
+            "exposed": "EXPOSED",
+            "runtime": "RUNTIME",
+            "variable": "VAR-REF",
+            "pipe-safe": "SAFE",
+        }.get(risk_level, risk_level)
+
+        _print(f"  {time_display:<18s} {risk_tag:<10s} {category:<14s} {project:<14s} {cmd_display}")
+
+    _print(f"  {'—'*86}")
+    _print()
+
+    exposed = by_risk.get("exposed", 0)
+    safe = by_risk.get("pipe-safe", 0) + by_risk.get("variable", 0)
+    runtime = by_risk.get("runtime", 0)
+
+    if safe > 0:
+        _print(f"  {safe} of {len(exposures)} flagged commands are likely false positives")
+        _print(f"  (secret referenced by variable or piped — never appears in transcript).")
+    if exposed > 0:
+        _print(f"\n  {exposed} commands had literal secrets in the command text.")
+        _print(f"  {SECRET_WARNING}")
+    _print()
+
+
 def render_warns(all_records, since=None, out=None):
     """Show hook warning events from the audit log, cross-referenced with session data."""
     if out is None:
@@ -1923,6 +2082,14 @@ def main():
         help="Show hook warning events from ~/.claude/hook-audit.jsonl. "
              "Cross-references with session data to show user approval decisions.",
     )
+    parser.add_argument(
+        "--secrets",
+        action="store_true",
+        default=False,
+        help="Detailed secret exposure report. Shows each flagged command with "
+             "exposure analysis: whether the secret was a literal (exposed), "
+             "variable reference, runtime expansion, or pipe-safe.",
+    )
     args = parser.parse_args()
 
     trend_window = args.trend if args.trend is not None else None
@@ -1975,7 +2142,7 @@ def main():
 
     all_records = filter_records(all_records, since=since, project=args.project)
 
-    if not all_records and not args.generate_settings and not args.warns:
+    if not all_records and not args.generate_settings and not args.warns and not args.secrets:
         print("No tool call data found.", file=sys.stderr)
         sys.exit(1)
 
@@ -2009,6 +2176,10 @@ def main():
 
     if args.warns:
         render_warns(all_records, since=since)
+        return
+
+    if args.secrets:
+        render_secrets(all_records)
         return
 
     if args.apply is not None:

@@ -28,7 +28,7 @@ python3 claude-approval-report.py --warns --since 7d   # warns from the last wee
 python3 claude-approval-report.py -o           # write to auto-named timestamped file
 ```
 
-No dependencies beyond Python 3.8+ stdlib. Test suites: `tests/test_report.py` (155 tests for the main script's pure functions), `hooks/test_block_secrets.py` (67 tests), `hooks/test_bypass_fixes.py` (110 tests), `hooks/test_round2_bypass_fixes.py` (50 tests), `hooks/test_fp_fixes.py` (28 tests), `hooks/test_infra_usability.py` (136 tests), `hooks/test_warn_secrets.py` (15 tests), `hooks/test_warn_mode.py` (30 tests) — 591 total.
+No dependencies beyond Python 3.11+ stdlib. Test suites: `tests/test_report.py` (155 tests for the main script's pure functions), `hooks/test_block_secrets.py` (67 tests), `hooks/test_bypass_fixes.py` (110 tests), `hooks/test_round2_bypass_fixes.py` (50 tests), `hooks/test_fp_fixes.py` (28 tests), `hooks/test_infra_usability.py` (136 tests), `hooks/test_warn_secrets.py` (15 tests), `hooks/test_warn_mode.py` (30 tests) — 591 total.
 
 ## Architecture
 
@@ -137,6 +137,7 @@ A two-round multi-agent red team engagement on 2026-05-08 targeted the hooks wit
 - **Bash array expansion**: `a=(cat .env); "${a[@]}"` — array content not trackable
 - **Runtime path construction**: `os.listdir()` in scripts — no .env reference in args
 - **Generic write-then-execute**: script content has no sensitive path reference
+- **Symlink TOCTOU**: `_is_sensitive_path` calls `os.path.realpath()` which resolves symlinks at check time; a symlink could be repointed between the hook's check and command execution. Mitigation: the hook runs in the same process tick as tool dispatch, making the race window extremely small, but it is theoretically exploitable with a pre-positioned symlink and a concurrent process.
 
 ### Usability testing (2026-05-08) — 2 false positives found and fixed
 
