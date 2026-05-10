@@ -331,6 +331,17 @@ def _classify_leak_confidence(command):
     return "low"
 
 
+_RE_QUOTED_HEREDOC = re.compile(
+    r"<<\s*-?\s*['\"](\w+)['\"]\s*\n(.*?)^\1$",
+    re.MULTILINE | re.DOTALL,
+)
+
+
+def _strip_quoted_heredocs(command):
+    """Remove bodies of single/double-quoted heredocs (no variable expansion)."""
+    return _RE_QUOTED_HEREDOC.sub(r"<<'\1'\n\1", command)
+
+
 def _check_command_secrets(command):
     """Check for embedded secrets in a command string.
 
@@ -338,6 +349,7 @@ def _check_command_secrets(command):
     present in the command text, or 'warn' for patterns that will expand to
     secrets at runtime (variable/subshell references).
     """
+    command = _strip_quoted_heredocs(command)
     if _PREFIXED_TOKEN_PATTERNS.search(command):
         return ("Command contains a known API token/key pattern", "block")
 
