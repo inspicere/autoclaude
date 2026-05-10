@@ -19,6 +19,7 @@ SUITES = [
     ("hooks/test_bypass_fixes.py", "Bypass Fixes Tests"),
     ("hooks/test_round2_bypass_fixes.py", "Round 2 Bypass Fixes Tests"),
     ("hooks/test_round3_bypass_fixes.py", "Round 3 Bypass Fixes Tests"),
+    ("hooks/test_analysis_fixes.py", "Analysis Findings Fixes Tests"),
     ("hooks/test_fp_fixes.py", "False Positive Fixes Tests"),
     ("hooks/test_infra_usability.py", "Infrastructure Usability Tests"),
     ("hooks/test_warn_secrets.py", "Warn Secrets Output Tests"),

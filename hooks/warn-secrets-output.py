@@ -62,8 +62,8 @@ _RE_PRIVATE_KEY = re.compile(
 _EXEMPT_COMMANDS = re.compile(
     r'^\s*(?:grep|egrep|fgrep|rg|ag|ack)\b'
     r'|^\s*(?:cat|head|tail|less)\s+.*(?:block-secrets|claude-approval-report|warn-secrets|README|CLAUDE\.md)'
-    r'|^\s*python3\s+.*(?:block-secrets|claude-approval-report|warn-secrets|test_|ci-test-runner|verify_)'
-    r'|^\s*git\s+(?:diff|log|show)\b'
+    r'|^\s*python3\s+.*(?:block-secrets|claude-approval-report|warn-secrets|ci-test-runner|verify_)'
+    r'|^\s*python3\s+.*(?:hooks|tests)/test_\w+\.py\b'
 )
 
 _EXEMPT_FILE_PATHS = re.compile(

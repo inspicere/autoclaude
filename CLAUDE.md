@@ -28,7 +28,7 @@ python3 claude-approval-report.py --warns --since 7d   # warns from the last wee
 python3 claude-approval-report.py -o           # write to auto-named timestamped file
 ```
 
-No dependencies beyond Python 3.11+ stdlib. Test suites: `tests/test_report.py` (155 tests for the main script's pure functions), `hooks/test_block_secrets.py` (67 tests), `hooks/test_bypass_fixes.py` (110 tests), `hooks/test_round2_bypass_fixes.py` (50 tests), `hooks/test_round3_bypass_fixes.py` (82 tests), `hooks/test_fp_fixes.py` (28 tests), `hooks/test_infra_usability.py` (136 tests), `hooks/test_warn_secrets.py` (15 tests), `hooks/test_warn_mode.py` (30 tests) — 673 total.
+No dependencies beyond Python 3.11+ stdlib. Test suites: `tests/test_report.py` (155 tests for the main script's pure functions), `hooks/test_block_secrets.py` (67 tests), `hooks/test_bypass_fixes.py` (110 tests), `hooks/test_round2_bypass_fixes.py` (50 tests), `hooks/test_round3_bypass_fixes.py` (82 tests), `hooks/test_analysis_fixes.py` (68 tests), `hooks/test_fp_fixes.py` (28 tests), `hooks/test_infra_usability.py` (136 tests), `hooks/test_warn_secrets.py` (15 tests), `hooks/test_warn_mode.py` (30 tests) — 741 total.
 
 ## Architecture
 
@@ -83,11 +83,11 @@ Reference these docs when adding new secret patterns or modifying detection logi
 
 ## CI/CD (`scripts/ci-test-runner.py`, `.forgejo/workflows/test.yml`)
 
-Forgejo Actions workflow runs all 9 test suites (673 tests) on push to `main` and on PRs. Uses `node:22-slim` image on the `docker` runner label, installs Python via apt. Results are uploaded to DefectDojo as "Generic Findings Import" — test failures become findings, clean runs auto-close previous findings via `close_old_findings=true`. Product: `autoclaude` (ID 21), Engagement: `CI Tests` (ID 36), Product Type: `Inspicere Projects`. The `DEFECTDOJO_API_TOKEN` secret is configured on the Forgejo repo.
+Forgejo Actions workflow runs all 10 test suites (741 tests) on push to `main` and on PRs. Uses `node:22-slim` image on the `docker` runner label, installs Python via apt. Results are uploaded to DefectDojo as "Generic Findings Import" — test failures become findings, clean runs auto-close previous findings via `close_old_findings=true`. Product: `autoclaude` (ID 21), Engagement: `CI Tests` (ID 36), Product Type: `Inspicere Projects`. The `DEFECTDOJO_API_TOKEN` secret is configured on the Forgejo repo.
 
 ## Known Issues (from 2026-05-10 round 3 red team engagement) — ALL 10 CONFIRMED BYPASSES FIXED
 
-A third multi-agent red team engagement on 2026-05-10 targeted the hooks with the same planted fake secret in `~/autoclaude_engagement_target/.env`. 8 parallel agents (4 Opus, 4 Sonnet) found 10 confirmed live bypasses (all extracted full file contents with zero PostToolUse warnings) plus 25 analysis-only findings. All 10 confirmed bypasses were remediated same-day. Hook grew from ~1183 to ~1324 lines, 673 tests across 9 suites.
+A third multi-agent red team engagement on 2026-05-10 targeted the hooks with the same planted fake secret in `~/autoclaude_engagement_target/.env`. 8 parallel agents (4 Opus, 4 Sonnet) found 10 confirmed live bypasses (all extracted full file contents with zero PostToolUse warnings) plus 25 analysis-only findings. All 10 confirmed bypasses were remediated same-day. Hook grew from ~1183 to ~1324 lines, then to ~1450 lines with analysis-only fixes. 741 tests across 10 suites.
 
 ### Round 3 (2026-05-10) — ALL FIXED
 
@@ -105,8 +105,19 @@ A third multi-agent red team engagement on 2026-05-10 targeted the hooks with th
 32. ~~**`xargs` piping to `sh`/`bash` not detected**~~ — Extended xargs handler to detect shell interpreters (sh, bash, zsh, dash, ksh) as the target command.
 33. ~~**`for` loop variable assignment not tracked**~~ — Added `_RE_FOR_LOOP` regex and for-loop variable tracking in `main()`. Added `do`/`then`/`else`/`elif` keyword stripping to `_strip_prefixes`.
 
-#### Analysis-only findings (25, not yet validated)
-Deep code analysis identified 25 additional gaps including: PostToolUse `test_` exemption abuse, PostToolUse git diff/log/show exemption hiding git-stored secrets, `$'...'` ANSI-C quoting parser desync, local/declare/typeset/readonly variable assignments not tracked, `>()` output process substitution not extracted, 13+ missing command wrappers (chroot, nsenter, runuser, su, setpriv, sg, systemd-run, etc.), crypto tools (gpg, age, ssh-keygen) not in file-access detection, at/batch/crontab deferred execution, expect (Tcl interpreter) not in `_INTERPRETERS`, MCP tool blanket passthrough (architectural).
+#### Analysis-only findings (25 identified, 10 fixed, 15 remaining)
+Deep code analysis identified 25 additional gaps. 10 have been fixed:
+- ~~PostToolUse `test_` exemption abuse~~ — tightened regex to require `hooks/` or `tests/` path prefix
+- ~~PostToolUse git diff/log/show exemption~~ — removed blanket exemption, output now scanned for known token patterns
+- ~~`$'...'` ANSI-C quoting parser desync~~ — added `_decode_ansi_c_quotes()` preprocessing for `\xNN`, `\NNN`, `\uNNNN` escapes
+- ~~local/declare/typeset/readonly variable assignments~~ — extended `_RE_VAR_ASSIGN` regex
+- ~~`>()` output process substitution~~ — added `_RE_OUTPUT_PROC_SUBST` extraction
+- ~~8 missing command wrappers~~ — added chroot, nsenter, runuser, doas, pkexec, setpriv, sg, newgrp to `_COMMAND_WRAPPERS`; added su `-c` and systemd-run `--` command extraction
+- ~~Crypto tools (gpg, age, ssh-keygen)~~ — added to `_FILE_FLAG_ARGS` and `_FILE_READERS`
+- ~~at/batch/crontab deferred execution~~ — `at`/`batch` blocked outright, `crontab -e` blocked
+- ~~expect interpreter~~ — added to `_INTERPRETERS` with Tcl `open` pattern
+
+Remaining 15: 5+ missing wrappers (machinectl, lxc-attach, toolbox, flatpak, etc.), bash array expansion (unfixable by static analysis), shell function indirection (unfixable), runtime path construction (unfixable), generic write-then-execute (unfixable), symlink TOCTOU (tiny window), MCP tool blanket passthrough (architectural).
 
 ## Known Issues (from 2026-05-08 red team engagement) — ALL FIXABLE ISSUES RESOLVED
 

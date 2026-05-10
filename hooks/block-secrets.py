@@ -169,6 +169,8 @@ _FILE_READERS = frozenset({
     # Additional content-reading tools (round 2 audit)
     'shuf', 'unexpand', 'colrm', 'look', 'tsort', 'ptx', 'nkf',
     'uuencode', 'base32', 'zcat', 'bzcat', 'xzcat', 'lz4', 'vidir',
+    # Crypto tools that read files (round 4 analysis)
+    'gpg', 'gpg2',
 })
 
 # Tools that accept a sensitive file via -flag VALUE (separate token, not -flag=VALUE)
@@ -178,6 +180,10 @@ _FILE_FLAG_ARGS = {
     'ansible-vault': {'--vault-password-file', '--vault-pass-file'},
     'ansible-playbook': {'--vault-password-file', '--vault-pass-file'},
     'ansible': {'--vault-password-file', '--vault-pass-file'},
+    'gpg': {'--keyring', '--secret-keyring', '--output'},
+    'gpg2': {'--keyring', '--secret-keyring', '--output'},
+    'age': {'-i', '--identity', '-o', '--output'},
+    'ssh-keygen': {'-f'},
 }
 
 # Long-option prefixes whose value (after '=') is a file path, for _FILE_READERS members
@@ -196,6 +202,9 @@ _COMMAND_WRAPPERS = frozenset({
     'stdbuf', 'ionice', 'numactl', 'taskset', 'chrt',
     # Round 3 additions
     'setsid', 'flock', 'unshare', 'coproc', 'watch',
+    # Round 4 additions (analysis-only findings)
+    'chroot', 'nsenter', 'runuser', 'doas', 'pkexec', 'setpriv',
+    'sg', 'newgrp',
 })
 
 _DANGEROUS_ENV_VARS = frozenset({
@@ -206,10 +215,12 @@ _DANGEROUS_ENV_VARS = frozenset({
 
 _INTERPRETERS = frozenset({
     'python3', 'python', 'perl', 'ruby', 'node', 'php', 'lua',
+    'expect',
 })
 
 _RE_COMMAND_SUBST = re.compile(r'\$\((.+?)\)', re.DOTALL)
 _RE_PROC_SUBST = re.compile(r'<\((.+?)\)', re.DOTALL)
+_RE_OUTPUT_PROC_SUBST = re.compile(r'>\((.+?)\)', re.DOTALL)
 _RE_BACKTICK_SUBST = re.compile(r'`(.+?)`', re.DOTALL)
 
 _SENSITIVE_DIRS_RE = re.compile(
@@ -242,9 +253,29 @@ _RE_INTERP_FILE_READ = re.compile(
     r'''|open\s*\(\s*\w+\s*,\s*['"](?:<\s*)?['"]?\s*,\s*['"]([^'"]+)['"]'''
     r'''|open\s+\w+\s*,\s*['"]?([^'";\s]+)['"]?'''
     r'''|file_get_contents\s*\(\s*['"]([^'"]+)['"]'''
+    r'''|open\s+['"]([^'"]+)['"]\s+r'''
 )
 
 _RE_QUOTED_ARG = re.compile(r"""'([^']*)'|"((?:[^"\\]|\\.)*)"|(\S+)""")
+
+_RE_ANSI_C_QUOTE = re.compile(r"""\$'((?:[^'\\]|\\.)*)'""")
+
+
+def _decode_ansi_c_quotes(cmd):
+    """Decode $'...' ANSI-C quoting (\\xNN, \\NNN octal, \\uNNNN, \\UNNNNNNNN).
+
+    Replaces $'...' with the decoded content (unquoted) so downstream
+    analysis sees the real characters.
+    """
+    def _replacer(m):
+        s = m.group(1)
+        s = re.sub(r'\\x([0-9a-fA-F]{2})', lambda x: chr(int(x.group(1), 16)), s)
+        s = re.sub(r'\\([0-7]{1,3})', lambda x: chr(int(x.group(1), 8)), s)
+        s = re.sub(r'\\u([0-9a-fA-F]{4})', lambda x: chr(int(x.group(1), 16)), s)
+        s = re.sub(r'\\U([0-9a-fA-F]{8})', lambda x: chr(int(x.group(1), 16)), s)
+        s = s.replace('\\n', ' ').replace('\\t', ' ').replace('\\\\', '\\')
+        return s
+    return _RE_ANSI_C_QUOTE.sub(_replacer, cmd)
 
 
 def _shannon_entropy(data):
@@ -696,6 +727,43 @@ def _strip_wrappers(parts):
                 idx += 1
                 if flag in ('-n', '--interval') and idx < len(parts) and not parts[idx].startswith('-'):
                     idx += 1
+        elif base == 'chroot':
+            idx += 1
+            while idx < len(parts) and parts[idx].startswith('-'):
+                idx += 1
+            if idx < len(parts):
+                idx += 1
+        elif base == 'nsenter':
+            idx += 1
+            _NSENTER_VALUE_FLAGS = frozenset({
+                '-t', '--target', '-S', '--setuid', '-G', '--setgid',
+                '--wd', '--wdns',
+            })
+            while idx < len(parts) and parts[idx].startswith('-'):
+                if parts[idx] in _NSENTER_VALUE_FLAGS:
+                    idx += 2
+                elif '=' in parts[idx]:
+                    idx += 1
+                else:
+                    idx += 1
+        elif base in ('runuser', 'doas', 'pkexec'):
+            idx += 1
+            while idx < len(parts) and parts[idx].startswith('-'):
+                flag = parts[idx]
+                idx += 1
+                if flag in ('-u', '-g', '--user', '--group') and idx < len(parts):
+                    idx += 1
+        elif base == 'setpriv':
+            idx += 1
+            while idx < len(parts) and parts[idx].startswith('-'):
+                if '=' in parts[idx]:
+                    idx += 1
+                else:
+                    idx += 1
+        elif base in ('sg', 'newgrp'):
+            idx += 1
+            if idx < len(parts) and not parts[idx].startswith('-'):
+                idx += 1
         else:
             break
     return parts[idx:]
@@ -945,12 +1013,58 @@ def _check_single_command_access(command):
             if xargs_base in ('sh', 'bash', 'zsh', 'dash', 'ksh'):
                 return f"xargs pipes to shell interpreter: {xargs_base}"
 
+    if base in ('at', 'batch'):
+        return f"Deferred execution via {base} blocked (commands run outside hook oversight)"
+
+    if base == 'crontab':
+        for arg in parts[1:]:
+            if arg == '-e':
+                return "crontab -e blocked (edits run outside hook oversight)"
+            if arg == '-r':
+                break
+            if not arg.startswith('-') and _is_sensitive_path(arg):
+                return f"crontab references sensitive file: {arg}"
+
     if base == 'make':
         for arg in parts[1:]:
             if arg.startswith('-') and 'f' in arg:
                 continue
             if _is_sensitive_path(arg):
                 return f"Command accesses sensitive file via make: {arg}"
+
+    if base == 'su':
+        for i, arg in enumerate(parts[1:], 1):
+            if arg in ('-c', '--command') and i + 1 < len(parts):
+                inner = _strip_quotes(' '.join(parts[i + 1:]))
+                result = _check_single_command_access(inner)
+                if result:
+                    return f"su -c wraps blocked command: {result}"
+                break
+            if arg.startswith('--command='):
+                inner = _strip_quotes(arg[len('--command='):])
+                result = _check_single_command_access(inner)
+                if result:
+                    return f"su --command wraps blocked command: {result}"
+                break
+
+    if base == 'systemd-run':
+        in_cmd = False
+        for i, arg in enumerate(parts[1:], 1):
+            if arg == '--':
+                in_cmd = True
+                continue
+            if in_cmd:
+                remaining = ' '.join(parts[i:])
+                result = _check_single_command_access(remaining)
+                if result:
+                    return f"systemd-run wraps blocked command: {result}"
+                break
+            if not arg.startswith('-'):
+                remaining = ' '.join(parts[i:])
+                result = _check_single_command_access(remaining)
+                if result:
+                    return f"systemd-run wraps blocked command: {result}"
+                break
 
     if base == 'eval':
         m = _RE_EVAL.search(cmd)
@@ -1001,7 +1115,7 @@ def _check_single_command_access(command):
         if inner:
             inner_cmds = _split_shell_commands(inner)
             # Track variable assignments within the subshell content
-            _RE_INNER_VAR = re.compile(r'^(?:export\s+)?(\w+)=(\S+)')
+            _RE_INNER_VAR = re.compile(r'^(?:(?:export|local|declare|typeset|readonly)\s+(?:-\w+\s+)*)?(\w+)=(\S+)')
             inner_sensitive_vars = set()
             for ic in inner_cmds:
                 mv = _RE_INNER_VAR.match(ic.strip())
@@ -1039,7 +1153,7 @@ def _check_single_command_access(command):
                 script = ' '.join(parts[i + 1:])
                 for fm in _RE_INTERP_FILE_READ.finditer(script):
                     path = (fm.group(1) or fm.group(2) or fm.group(3)
-                            or fm.group(4) or fm.group(5))
+                            or fm.group(4) or fm.group(5) or fm.group(6))
                     if path and _is_sensitive_path(path):
                         return f"Interpreter reads sensitive file: {path}"
                 sensitive = _check_sensitive_paths_in_text(script)
@@ -1185,11 +1299,14 @@ def main():
         _ctx_command = command
 
         command_for_scan = _strip_quoted_heredocs(command)
+        command_for_scan = _decode_ansi_c_quotes(command_for_scan)
 
         sub_cmds = _split_shell_commands(command_for_scan)
         for m in _RE_COMMAND_SUBST.finditer(command_for_scan):
             sub_cmds.extend(_split_shell_commands(m.group(1)))
         for m in _RE_PROC_SUBST.finditer(command_for_scan):
+            sub_cmds.extend(_split_shell_commands(m.group(1)))
+        for m in _RE_OUTPUT_PROC_SUBST.finditer(command_for_scan):
             sub_cmds.extend(_split_shell_commands(m.group(1)))
         for m in _RE_BACKTICK_SUBST.finditer(command_for_scan):
             sub_cmds.extend(_split_shell_commands(m.group(1)))
@@ -1208,7 +1325,7 @@ def main():
 
         # Variable-indirection tracking: find VAR=sensitive_path assignments,
         # then flag any command that uses $VAR or ${VAR} as an argument.
-        _RE_VAR_ASSIGN = re.compile(r'^(?:export\s+)?(\w+)=(\S+)')
+        _RE_VAR_ASSIGN = re.compile(r'^(?:(?:export|local|declare|typeset|readonly)\s+(?:-\w+\s+)*)?(\w+)=(\S+)')
         _RE_FOR_LOOP = re.compile(r'^for\s+(\w+)\s+in\s+(.*)')
         sensitive_vars = set()
         for sub_cmd in sub_cmds:
