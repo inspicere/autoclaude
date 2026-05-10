@@ -62,6 +62,23 @@ python3 claude-approval-report.py --generate-settings
 
 See [docs/hooks.md](docs/hooks.md) for detection details, limitations, and configuration.
 
+### Landlock kernel sandbox (prototype)
+
+The static-analysis hooks can't catch runtime indirection: shell function calls (`r() { cat "$1"; }; r .env`), bash array expansion, or interpreter path construction. The Landlock sandbox solves this at the kernel level — it restricts `open()` syscalls regardless of how the path was derived.
+
+```bash
+# Run a command with Landlock restrictions (denies read on sensitive files)
+python3 hooks/landlock-sandbox.py -c "r() { cat \"\$1\"; }; r ~/.env"
+# cat: /home/user/.env: Permission denied
+
+# Safe commands work normally
+python3 hooks/landlock-sandbox.py -c "echo hello && ls /tmp"
+# hello
+# ...
+```
+
+Requires Linux 5.13+ with Landlock enabled (kernel 6.1+ recommended for ABI v4+). No privileges needed. Currently a standalone prototype — see [the upstream proposal](https://github.com/anthropics/claude-code/issues/57901) for integrating this as a hook sandbox directive.
+
 ## Report modes
 
 | Flag | What it shows |
@@ -92,9 +109,13 @@ Claude Code stores session transcripts as JSONL under `~/.claude/projects/`. Thi
 6. Groups by normalized command prefix for aggregation
 7. Renders the selected output mode
 
+## Red team results
+
+Three rounds of multi-agent adversarial testing (8 parallel agents per round, mixed Opus/Sonnet) found 33 bypass vectors — all remediated. The hooks grew from ~500 to ~1450 lines. 15 remaining gaps are either unfixable by static analysis (solved by Landlock) or architectural (MCP passthrough).
+
 ## CI/CD
 
-Forgejo Actions runs 591 tests across 8 suites on every push. Failures are reported to DefectDojo. See `.forgejo/workflows/test.yml`.
+Forgejo Actions runs 741 tests across 10 suites on every push. Failures are reported to DefectDojo. See `.forgejo/workflows/test.yml`.
 
 ## Docs
 
