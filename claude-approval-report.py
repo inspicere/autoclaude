@@ -748,6 +748,17 @@ def _count_secret_exposures(records):
     return exposed
 
 
+_RE_GIT_HASH = re.compile(r'^[0-9a-f]{7,40}$')
+_RE_SSH_PUBKEY = re.compile(r'ssh-(?:ed25519|rsa|ecdsa)\s+\S+')
+_RE_GIT_REF_PATH = re.compile(r'refs/(?:original|heads|remotes|tags)/')
+_NON_SECRET_ASSIGNS = frozenset({
+    'GIT_AUTHOR_NAME', 'GIT_AUTHOR_EMAIL',
+    'GIT_COMMITTER_NAME', 'GIT_COMMITTER_EMAIL',
+    'GIT_AUTHOR_DATE', 'GIT_COMMITTER_DATE',
+    'HOME', 'PATH', 'SHELL', 'USER', 'LANG', 'TERM',
+})
+
+
 def _classify_exposure_risk(cmd, category):
     """Classify whether a secret-flagged command actually exposes the secret.
 
@@ -756,14 +767,23 @@ def _classify_exposure_risk(cmd, category):
     - "variable": secret referenced via $VAR — value may appear in output
     - "pipe-safe": secret flows through pipe, never appears in transcript
     - "runtime": secret fetched at runtime via $(), may or may not leak
+    - "false-positive": detected pattern is not actually a secret
     """
     if category == "token":
+        if re.search(r'(?:json\.dumps|tool_result|echo\s+.*\{.*tool_name)', cmd):
+            return ("false-positive", "Test payload containing synthetic token")
         return ("exposed", "Literal token in command text")
     if category == "jwt":
         return ("exposed", "Literal JWT in command text")
     if category == "private_key":
         return ("exposed", "Private key material in command text")
     if category == "high_entropy":
+        if _RE_SSH_PUBKEY.search(cmd):
+            return ("false-positive", "SSH public key (not a secret)")
+        if re.search(r'\bgit\b.*\b(?:tag|update-ref|filter-branch|rebase|cherry-pick)\b', cmd):
+            return ("false-positive", "Git commit hash or ref path")
+        if _RE_GIT_REF_PATH.search(cmd):
+            return ("false-positive", "Git ref path")
         return ("exposed", "High-entropy blob in command text")
 
     if category == "auth_header":
@@ -786,6 +806,15 @@ def _classify_exposure_risk(cmd, category):
                 return ("variable", f"Auth value {val} — variable ref, may appear in output")
             if val in ('{}', '{0}') and '|' in cmd:
                 return ("pipe-safe", f"Auth value from xargs/pipe — never in transcript")
+            if re.search(r'^Basic\s+', val, re.IGNORECASE) or (
+                    category == "auth_header" and 'Basic' in cmd):
+                try:
+                    import base64
+                    decoded = base64.b64decode(val.split()[-1] if ' ' in val else val).decode('utf-8', errors='ignore')
+                    if re.search(r'(?:test|example|dummy|fake|wrong|changeme|placeholder)', decoded, re.IGNORECASE):
+                        return ("false-positive", "Basic auth with test/dummy credentials")
+                except Exception:
+                    pass
             return ("exposed", "Literal auth credential in command text")
         return ("exposed", "Auth header with literal value")
 
@@ -793,6 +822,8 @@ def _classify_exposure_risk(cmd, category):
         m = _RE_SECRET_ASSIGN.search(cmd)
         if m:
             var_name = m.group(1)
+            if var_name.upper() in _NON_SECRET_ASSIGNS:
+                return ("false-positive", f"{var_name} is not a secret")
             val = m.group(2).strip("\"'")
             if val.startswith('$(') or val.startswith('`'):
                 if '|' in cmd and re.search(r'\|\s*\w', cmd):
@@ -1715,12 +1746,13 @@ def render_secrets(all_records, out=None):
 
     # Summary
     _print(f"  By exposure risk:")
-    risk_order = ["exposed", "runtime", "variable", "pipe-safe"]
+    risk_order = ["exposed", "runtime", "variable", "pipe-safe", "false-positive"]
     risk_labels = {
         "exposed": "EXPOSED  — literal secret in command text (in transcript)",
         "runtime": "RUNTIME  — secret fetched via $(), may appear in output",
         "variable": "VARIABLE — secret referenced via $VAR, may appear in output",
         "pipe-safe": "PIPE-SAFE — secret flows through pipe, never in transcript",
+        "false-positive": "FALSE-POS — not actually a secret (git hash, public key, test data)",
     }
     for risk in risk_order:
         count = by_risk.get(risk, 0)
@@ -1768,6 +1800,7 @@ def render_secrets(all_records, out=None):
             "runtime": "RUNTIME",
             "variable": "VAR-REF",
             "pipe-safe": "SAFE",
+            "false-positive": "FALSE-POS",
         }.get(risk_level, risk_level)
 
         _print(f"  {time_display:<18s} {risk_tag:<10s} {category:<14s} {project:<14s} {cmd_display}")
@@ -1777,11 +1810,12 @@ def render_secrets(all_records, out=None):
 
     exposed = by_risk.get("exposed", 0)
     safe = by_risk.get("pipe-safe", 0) + by_risk.get("variable", 0)
+    fp = by_risk.get("false-positive", 0)
     runtime = by_risk.get("runtime", 0)
 
-    if safe > 0:
-        _print(f"  {safe} of {len(exposures)} flagged commands are likely false positives")
-        _print(f"  (secret referenced by variable or piped — never appears in transcript).")
+    if safe + fp > 0:
+        _print(f"  {safe + fp} of {len(exposures)} flagged commands are not real exposures")
+        _print(f"  ({fp} false positives, {safe} variable/pipe-safe).")
     if exposed > 0:
         _print(f"\n  {exposed} commands had literal secrets in the command text.")
         _print(f"  {SECRET_WARNING}")
