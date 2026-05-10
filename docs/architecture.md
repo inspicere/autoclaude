@@ -79,6 +79,8 @@ This document shows how the protection layers in this project fit together, usin
 | `grep PASSWORD .env` | allowed | exempt | exempt | — |
 | `$TOKEN` variable reference | allowed | exempt | — | — |
 
+**Known gap (2026-05-10 audit):** PostToolUse exempt patterns use substring matching, so grep-family output and commands whose names contain exempted substrings (e.g. `block-secrets`) are not scanned. This makes PostToolUse the weakest layer in the defense stack. PreToolUse has 541 tests and 3 rounds of red teaming; PostToolUse has 15 tests and no adversarial testing.
+
 ## Homelab deployment
 
 ```
