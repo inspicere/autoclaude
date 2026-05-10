@@ -219,7 +219,7 @@ def main():
 
     types = ", ".join(findings)
     response = {
-        "decision": "block",
+        "decision": "warn",
         "reason": (
             f"SECRET IN OUTPUT: {types}. "
             f"{source_desc} produced output containing secrets. "
