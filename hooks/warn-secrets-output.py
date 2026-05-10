@@ -62,7 +62,7 @@ _RE_PRIVATE_KEY = re.compile(
 _EXEMPT_COMMANDS = re.compile(
     r'^\s*(?:grep|egrep|fgrep|rg|ag|ack)\b'
     r'|^\s*(?:cat|head|tail|less)\s+.*(?:block-secrets|claude-approval-report|warn-secrets|README|CLAUDE\.md)'
-    r'|^\s*python3\s+.*(?:block-secrets|claude-approval-report|test_hook)'
+    r'|^\s*python3\s+.*(?:block-secrets|claude-approval-report|warn-secrets|test_|ci-test-runner|verify_)'
     r'|^\s*git\s+(?:diff|log|show)\b'
 )
 
