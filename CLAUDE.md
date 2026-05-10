@@ -72,15 +72,18 @@ PreToolUse correlation (`HOOK_CORRELATE=1`, on by default): after standard patte
 
 ## Documentation (`docs/`)
 
+- **`cli-reference.md`** — full CLI flag documentation with all modes, filters, and examples
+- **`hooks.md`** — hook detection reference with categorized tables of what is caught, allowed, and undetectable
+- **`example-reports.md`** — real output samples from trend, summary, and secrets modes
+- **`architecture.md`** — reference architecture showing how deny rules, the hook, and MCP servers form a layered defense, with homelab deployment diagrams and adaptation instructions
 - **`auth-best-practices.md`** — index and quick reference for working with authenticated services when the hook and deny rules are active. Links to per-service guides:
   - `auth-vault.md`, `auth-api-services.md`, `auth-ansible.md`, `auth-ssh.md`, `auth-env-vars.md`, `auth-diskless-secrets.md`
-- **`architecture.md`** — reference architecture showing how deny rules, the hook, and MCP servers form a layered defense, with homelab deployment diagrams and adaptation instructions.
 
 Reference these docs when adding new secret patterns or modifying detection logic to ensure the documented workarounds remain valid.
 
 ## CI/CD (`scripts/ci-test-runner.py`, `.forgejo/workflows/test.yml`)
 
-Forgejo Actions workflow runs all 8 test suites (582 tests) on push to `main` and on PRs. Uses `node:22-slim` image on the `docker` runner label, installs Python via apt. Results are uploaded to DefectDojo as "Generic Findings Import" — test failures become findings, clean runs auto-close previous findings via `close_old_findings=true`. Product: `autoclaude` (ID 21), Engagement: `CI Tests` (ID 36), Product Type: `Inspicere Projects`. The `DEFECTDOJO_API_TOKEN` secret is configured on the Forgejo repo.
+Forgejo Actions workflow runs all 8 test suites (591 tests) on push to `main` and on PRs. Uses `node:22-slim` image on the `docker` runner label, installs Python via apt. Results are uploaded to DefectDojo as "Generic Findings Import" — test failures become findings, clean runs auto-close previous findings via `close_old_findings=true`. Product: `autoclaude` (ID 21), Engagement: `CI Tests` (ID 36), Product Type: `Inspicere Projects`. The `DEFECTDOJO_API_TOKEN` secret is configured on the Forgejo repo.
 
 ## Known Issues (from 2026-05-08 red team engagement) — ALL FIXABLE ISSUES RESOLVED
 
