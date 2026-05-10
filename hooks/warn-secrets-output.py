@@ -59,12 +59,53 @@ _RE_PRIVATE_KEY = re.compile(
     r'-----BEGIN[ A-Z0-9_-]{0,100}PRIVATE KEY(?:\s+BLOCK)?-----'
 )
 
-_EXEMPT_COMMANDS = re.compile(
-    r'^\s*(?:grep|egrep|fgrep|rg|ag|ack)\b'
-    r'|^\s*(?:cat|head|tail|less)\s+.*(?:block-secrets|claude-approval-report|warn-secrets|README|CLAUDE\.md)'
-    r'|^\s*python3\s+.*(?:block-secrets|claude-approval-report|warn-secrets|ci-test-runner|verify_)'
-    r'|^\s*python3\s+.*(?:hooks|tests)/test_\w+\.py\b'
+_EXEMPT_SCRIPT_NAMES = frozenset({
+    'block-secrets.py', 'claude-approval-report.py', 'warn-secrets-output.py',
+    'ci-test-runner.py',
+})
+
+_EXEMPT_READ_TARGETS = re.compile(
+    r'^(?:block-secrets|claude-approval-report|warn-secrets(?:-output)?|ci-test-runner)\.py$'
+    r'|^(?:README|CLAUDE)\.md$'
 )
+
+_RE_TEST_FILE_PATH = re.compile(r'(?:hooks|tests)/test_\w+\.py$')
+
+
+def _is_exempt_command(command):
+    """Check if a Bash command's output should be exempt from secret scanning.
+
+    Exempts reading project source/docs and running project scripts/tests.
+    Does NOT blanket-exempt grep-family (their output can contain real secrets).
+    Does NOT exempt python3 commands where the exempt name appears only in
+    flag values or positional args rather than the script path.
+    """
+    parts = command.strip().split()
+    if not parts:
+        return False
+
+    base = os.path.basename(parts[0])
+
+    if base in ('cat', 'head', 'tail', 'less') and len(parts) > 1:
+        file_args = [a for a in parts[1:] if not a.startswith('-')]
+        return any(_EXEMPT_READ_TARGETS.search(os.path.basename(a)) for a in file_args)
+
+    if base in ('python3', 'python'):
+        for i, arg in enumerate(parts[1:], 1):
+            if arg in ('-c', '-m'):
+                return False
+            if arg.startswith('-'):
+                continue
+            script_base = os.path.basename(arg)
+            if script_base in _EXEMPT_SCRIPT_NAMES:
+                return True
+            if script_base.startswith('verify_') and script_base.endswith('.py'):
+                return True
+            if _RE_TEST_FILE_PATH.search(arg):
+                return True
+            return False
+
+    return False
 
 _EXEMPT_FILE_PATHS = re.compile(
     r'(?:block-secrets|claude-approval-report|warn-secrets|README|CLAUDE\.md)'
@@ -188,7 +229,7 @@ def main():
 
     if tool_name == "Bash":
         command = tool_input.get("command", "")
-        if _EXEMPT_COMMANDS.search(command):
+        if _is_exempt_command(command):
             sys.exit(0)
         source_desc = f"The command `{command[:80]}`"
     elif tool_name in ("Read", "Edit"):

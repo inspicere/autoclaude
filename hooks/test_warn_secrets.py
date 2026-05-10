@@ -42,7 +42,7 @@ def main():
     results.append(test_hook('Bash', {'command': 'cat config.py'}, fake_token, True))
     results.append(test_hook('Bash', {'command': 'cat block-secrets.py'}, fake_token, False))
     results.append(test_hook('Bash', {'command': 'cat claude-approval-report.py'}, fake_token, False))
-    results.append(test_hook('Bash', {'command': 'grep token file'}, fake_token, False))
+    results.append(test_hook('Bash', {'command': 'grep token file'}, fake_token, True))
 
     print('\n=== PostToolUse: Read/Edit output scanning (NEW) ===')
     results.append(test_hook('Read', {'file_path': '/tmp/config.txt'}, fake_token, True))
