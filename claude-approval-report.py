@@ -700,6 +700,21 @@ _SECRET_KEYWORDS_RE = re.compile(
 )
 
 
+def _categorize_secret(cmd):
+    """Categorize what type of secret a command contains."""
+    if _PREFIXED_TOKEN_PATTERNS.search(cmd):
+        return "token"
+    elif _RE_JWT.search(cmd):
+        return "jwt"
+    elif _RE_PRIVATE_KEY.search(cmd):
+        return "private_key"
+    elif _RE_CURL_AUTH.search(cmd):
+        return "auth_header"
+    elif _RE_SECRET_ASSIGN.search(cmd):
+        return "secret_assign"
+    return "high_entropy"
+
+
 def _find_secret_exposures(records):
     """Find records where secrets were exposed in commands.
 
@@ -717,25 +732,20 @@ def _find_secret_exposures(records):
             continue
 
         cmd = r.get("_original_command", r["tool_input"].get("command", ""))
-        if _PREFIXED_TOKEN_PATTERNS.search(cmd):
-            results.append((r, "token"))
-        elif _RE_JWT.search(cmd):
-            results.append((r, "jwt"))
-        elif _RE_PRIVATE_KEY.search(cmd):
-            results.append((r, "private_key"))
-        elif _RE_CURL_AUTH.search(cmd):
-            results.append((r, "auth_header"))
-        elif _RE_SECRET_ASSIGN.search(cmd):
-            results.append((r, "secret_assign"))
-        else:
-            results.append((r, "high_entropy"))
+        results.append((r, _categorize_secret(cmd)))
 
     return results
 
 
 def _count_secret_exposures(records):
-    """Count records where secrets were exposed in command arguments."""
-    return len(_find_secret_exposures(records))
+    """Count records where secrets were actually exposed in command text."""
+    exposed = 0
+    for r, category in _find_secret_exposures(records):
+        cmd = r.get("_original_command", r["tool_input"].get("command", ""))
+        risk, _ = _classify_exposure_risk(cmd, category)
+        if risk == "exposed":
+            exposed += 1
+    return exposed
 
 
 def _classify_exposure_risk(cmd, category):
@@ -1439,9 +1449,12 @@ def render_trend(all_records, bucket="day", out=None):
         risk = r.get("risk", "unknown")
         if risk in ("destructive", "mutating", "read-only"):
             b[risk] += 1
-        display = r.get("display", "")
-        if "[secrets]" in display:
-            b["secrets"] += 1
+        if r.get("_has_secrets") and not r["rejected"]:
+            cmd = r.get("_original_command", r["tool_input"].get("command", ""))
+            cat = _categorize_secret(cmd)
+            risk_level, _ = _classify_exposure_risk(cmd, cat)
+            if risk_level == "exposed":
+                b["secrets"] += 1
 
     if not buckets:
         _print("No timestamped records found.")
