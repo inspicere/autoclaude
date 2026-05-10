@@ -1,6 +1,6 @@
 # Hook Detection Reference
 
-Two hooks protect Claude Code sessions from secret exposure. They work independently — neither imports from the other or from the main script.
+Two hooks protect Claude Code sessions from secret exposure. They work independently and neither imports from the other or from the main script.
 
 ## PreToolUse: block-secrets.py
 
@@ -70,7 +70,7 @@ Audit log: structured JSONL with timestamp, decision, tool, summary, reason, com
 
 ### Warn mode
 
-Some commands get `decision: "warn"` instead of block — the user sees a warning but can still approve. This applies to:
+Some commands get `decision: "warn"` instead of block. The user sees a warning but can still approve. This applies to:
 
 - Secret variable assignments where the value comes from a subshell (`TOKEN=$(vault kv get ...)`)
 - Password flags (`-p`) on commands like `mysql`, `htpasswd`
@@ -104,8 +104,8 @@ These are fundamental to pre-execution static analysis and cannot be fully resol
 
 | Limitation | Why | Mitigation |
 |------------|-----|------------|
-| Shell function indirection (`r() { cat "$1"; }; r .env`) | Function bodies create opaque indirection | None — architectural gap |
-| Bash array expansion (`a=(cat .env); "${a[@]}"`) | Array content not trackable | None — architectural gap |
+| Shell function indirection (`r() { cat "$1"; }; r .env`) | Function bodies create opaque indirection | None (architectural gap) |
+| Bash array expansion (`a=(cat .env); "${a[@]}"`) | Array content not trackable | None (architectural gap) |
 | Runtime path construction (`os.listdir()` in scripts) | No sensitive path in args | None |
 | Symlink TOCTOU | `realpath()` resolves at check time; symlink can be repointed before execution | Race window is sub-millisecond; requires pre-positioned symlink + concurrent process |
 | Encoded/obfuscated secrets below entropy threshold | Static analysis can't decode arbitrary encoding | Dual-threshold catches most real secrets |

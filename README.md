@@ -1,6 +1,6 @@
 # autoclaude
 
-A CLI tool that tells you where you're spending approval clicks in Claude Code — and what to do about it. It also catches secret leaks in your session history and provides hooks to prevent them in real time.
+A CLI tool that tells you where you're spending approval clicks in Claude Code, and what to do about it. It also catches secret leaks in your session history and provides hooks to prevent them in real time.
 
 ## Quick start
 
@@ -55,7 +55,7 @@ See [docs/hooks.md](docs/hooks.md) for detection details, limitations, and confi
 
 | Flag | What it shows |
 |------|---------------|
-| *(none)* | Full ranked tables — most prompted, rejected, risk breakdown, suggestions |
+| *(none)* | Full ranked tables: most prompted, rejected, risk breakdown, suggestions |
 | `--summary` | 12-line dashboard with counts, risk, top commands |
 | `--trend [window]` | Time-series table of approval rates, risk, and secrets per day/week/month |
 | `--secrets` | Every detected secret exposure with risk classification (exposed/runtime/variable/pipe-safe) |
@@ -87,7 +87,7 @@ Forgejo Actions runs 591 tests across 8 suites on every push. Failures are repor
 
 ## Docs
 
-- [CLI reference](docs/cli-reference.md) — all flags, filters, output modes, and examples
-- [Hook detection reference](docs/hooks.md) — what the hooks catch, allow, and can't detect
-- [Architecture](docs/architecture.md) — layered defense model and deployment diagrams
-- [Auth best practices](docs/auth-best-practices.md) — working with secrets when the hooks are active
+- [CLI reference](docs/cli-reference.md) - all flags, filters, output modes, and examples
+- [Hook detection reference](docs/hooks.md) - what the hooks catch, allow, and can't detect
+- [Architecture](docs/architecture.md) - layered defense model and deployment diagrams
+- [Auth best practices](docs/auth-best-practices.md) - working with secrets when the hooks are active

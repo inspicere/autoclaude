@@ -58,9 +58,9 @@ Every flagged command with exposure risk classification:
 
 | Risk | Meaning |
 |------|---------|
-| EXPOSED | Literal secret in command text — already in transcript and API |
-| RUNTIME | Secret fetched via `$()` at execution time — may appear in output |
-| VARIABLE | Referenced via `$VAR` — value may be in output but not command text |
+| EXPOSED | Literal secret in command text, already in transcript and API |
+| RUNTIME | Secret fetched via `$()` at execution time, may appear in output |
+| VARIABLE | Referenced via `$VAR`, value may be in output but not command text |
 | PIPE-SAFE | Secret flows through pipe, never appears in transcript |
 
 ### Warns
