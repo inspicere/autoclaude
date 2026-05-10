@@ -118,6 +118,25 @@ When `HOOK_CORRELATE=1` (default): after standard pattern scanning, reads recent
 - `git diff`/`log`/`show` (reviewing code with regex patterns)
 - Reading project files that contain pattern definitions (this hook, block-secrets.py, README, etc.)
 
+## Known bypasses (Round 3 red team, 2026-05-10) — OPEN
+
+10 confirmed bypasses found by 8 parallel agents (4 Opus, 4 Sonnet). All extracted full target file contents with zero PostToolUse warnings triggered. No fixes applied yet.
+
+| ID | Severity | Vector | Root cause |
+|----|----------|--------|------------|
+| C1 | Critical | `git diff --no-index /dev/null <target>` | git not in any detection set; PostToolUse exempts git diff output |
+| C2 | Critical | `BASH_ENV=<target> bash -c 'echo $VAR'` | `_strip_prefixes()` strips env assignments without checking path values |
+| C3 | Critical | `env --split-string='cat <target>'` | env wrapper stripping ignores `-S`/`--split-string` command arg |
+| H1 | High | `setsid cat <target>` | Not in `_COMMAND_WRAPPERS` |
+| H2 | High | `flock /tmp/x cat <target>` | Not in `_COMMAND_WRAPPERS` |
+| H3 | High | `unshare --map-root-user cat <target>` | Not in `_COMMAND_WRAPPERS` |
+| H4 | High | `find <dir> -name ".env" -exec cat {} \;` | grep-family handler skips `-exec`, never parses sub-command |
+| H5 | High | `coproc cat <target>` | `coproc` not recognized as keyword or wrapper |
+| H6 | High | `echo <target> \| xargs -I{} sh -c 'cat "{}"'` | xargs handler doesn't recognize sh/bash as indirect executors |
+| H7 | High | `for f in <target>; do cat "$f"; done` | for-loop variable assignment not tracked |
+
+25 additional analysis-only findings were identified but not yet validated.
+
 ## Known limitations
 
 These are fundamental to pre-execution static analysis and cannot be fully resolved:
