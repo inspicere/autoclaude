@@ -396,9 +396,13 @@ def _check_command_secrets(command):
             elif val and val.lower() not in _SAFE_PLACEHOLDERS:
                 return (f"Password embedded in CLI flag (visible in process list and logs)", "block")
 
-    has_password_cmd = any(os.path.basename(p) in _SHORT_P_PASSWORD_COMMANDS for p in parts)
-    if has_password_cmd:
-        for i, part in enumerate(parts):
+    pw_cmd_idx = -1
+    for i, p in enumerate(parts):
+        if os.path.basename(p) in _SHORT_P_PASSWORD_COMMANDS:
+            pw_cmd_idx = i
+            break
+    if pw_cmd_idx >= 0:
+        for i, part in enumerate(parts[pw_cmd_idx + 1:], pw_cmd_idx + 1):
             if part == '-p' and i + 1 < len(parts):
                 next_val = parts[i + 1].strip("\"'")
                 if next_val.startswith('$'):
