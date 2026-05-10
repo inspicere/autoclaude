@@ -205,12 +205,12 @@ test_warn_hook('Bash',
     'abc1234 fix: update readme',
     False,
     'git log safe output')
-# grep should still be exempt
+# grep output is now scanned (blanket exemption removed)
 test_warn_hook('Bash',
     {'command': 'grep -r "pattern" .'},
     'hvs.' + 'a' * 100,
-    False,
-    'grep still exempt')
+    True,
+    'grep output with token scanned')
 
 
 print("\n" + "=" * 60)
