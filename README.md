@@ -21,9 +21,9 @@ Python 3.11+, stdlib only, no dependencies.
 
 Over 33 days and ~39k tool calls across 10 projects:
 
-- **7-day rolling auto-allow rate climbed from 71% to 85%** as allowlist patterns were tuned with `--apply`
-- **84.6% overall auto-allow rate**, up from 63% in the first days of use
-- **410 genuine secret exposures identified** in session history (auth headers, high-entropy blobs, known token patterns)
+- **7-day rolling auto-allow rate climbed from 71% to 85.5%**, a 14pp increase as allowlist patterns were tuned with `--apply`
+- **84.8% overall auto-allow rate**, up from 63% in the first days of use
+- **384 genuine secret exposures identified** in session history (auth headers, high-entropy blobs, known token patterns), with 27 false positives automatically filtered
 - **Only 1 rejection** out of nearly 6,000 prompted commands, meaning approval friction is the main cost, not blocked work
 
 See [docs/example-reports.md](docs/example-reports.md) for full sample output from `--trend`, `--summary`, and `--secrets`.
@@ -69,7 +69,7 @@ See [docs/hooks.md](docs/hooks.md) for detection details, limitations, and confi
 | *(none)* | Full ranked tables: most prompted, rejected, risk breakdown, suggestions |
 | `--summary` | 12-line dashboard with counts, risk, top commands |
 | `--trend [window]` | Time-series table of approval rates, risk, and secrets per day/week/month |
-| `--secrets` | Every detected secret exposure with risk classification (exposed/runtime/variable/pipe-safe) |
+| `--secrets` | Every detected secret exposure with risk classification (exposed/runtime/variable/pipe-safe/false-pos) |
 | `--warns` | Hook warning events cross-referenced with user approval decisions |
 | `--why "cmd"` | Diagnose why a specific command gets prompted |
 | `--apply` | Write suggested allowlist patterns to settings files |
