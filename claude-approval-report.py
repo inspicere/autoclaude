@@ -1023,6 +1023,8 @@ def suggest_pattern(display):
         if "~/" in path:
             path = path.replace("~/", "**/")
         return f"Write({path})"
+    elif display.startswith("Grep"):
+        return "Grep"
     elif display.startswith("WebSearch"):
         return "WebSearch"
     elif display.startswith("WebFetch"):
@@ -1627,6 +1629,19 @@ BASELINE_DENY_RULES = [
     "Edit(**/.ansible-vault-password*)",
 ]
 
+BASELINE_SAFE_ALLOW = [
+    "Bash(cat *)",
+    "Bash(echo *)",
+    "Bash(find *)",
+    "Bash(grep *)",
+    "Bash(head *)",
+    "Bash(ls *)",
+    "Bash(pwd *)",
+    "Bash(tail *)",
+    "Bash(wc *)",
+    "Grep",
+]
+
 
 def render_generate_settings(all_records, out=None):
     """Generate recommended deny rules and hook config based on session analysis."""
@@ -1641,6 +1656,7 @@ def render_generate_settings(all_records, out=None):
 
     settings = {
         "permissions": {
+            "allow": list(BASELINE_SAFE_ALLOW),
             "deny": list(BASELINE_DENY_RULES),
         },
         "hooks": {
@@ -1660,21 +1676,29 @@ def render_generate_settings(all_records, out=None):
     }
 
     print(f"\nRecommended security settings", file=sys.stderr)
+    print(f"  Allow rules: {len(BASELINE_SAFE_ALLOW)} read-only patterns (Bash builtins + Grep tool)", file=sys.stderr)
     print(f"  Deny rules: {len(BASELINE_DENY_RULES)} patterns (Read/Write/Edit for sensitive files)", file=sys.stderr)
 
     global_settings = load_global_settings()
+    existing_allow = set(global_settings.get("permissions", {}).get("allow", []))
     existing_deny = set(global_settings.get("permissions", {}).get("deny", []))
+    new_allow = [r for r in BASELINE_SAFE_ALLOW if r not in existing_allow]
     new_deny = [r for r in BASELINE_DENY_RULES if r not in existing_deny]
-    already = len(BASELINE_DENY_RULES) - len(new_deny)
+    already_allow = len(BASELINE_SAFE_ALLOW) - len(new_allow)
+    already_deny = len(BASELINE_DENY_RULES) - len(new_deny)
 
-    if existing_deny:
-        print(f"  Already in ~/.claude/settings.json: {already} of {len(BASELINE_DENY_RULES)}", file=sys.stderr)
+    if existing_allow or existing_deny:
+        if existing_allow:
+            print(f"  Allow already configured: {already_allow} of {len(BASELINE_SAFE_ALLOW)}", file=sys.stderr)
+            if new_allow:
+                for rule in new_allow:
+                    print(f"    + {rule}", file=sys.stderr)
+        print(f"  Deny already configured: {already_deny} of {len(BASELINE_DENY_RULES)}", file=sys.stderr)
         if new_deny:
-            print(f"  New additions:", file=sys.stderr)
             for rule in new_deny:
                 print(f"    + {rule}", file=sys.stderr)
-        else:
-            print(f"  All baseline deny rules already configured.", file=sys.stderr)
+        if not new_allow and not new_deny:
+            print(f"  All baseline rules already configured.", file=sys.stderr)
 
     if all_records:
         exposures = _find_secret_exposures(all_records)

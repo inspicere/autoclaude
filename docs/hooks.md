@@ -131,9 +131,11 @@ These are fundamental to pre-execution static analysis and cannot be fully resol
 | Encoded/obfuscated secrets below entropy threshold | Static analysis can't decode arbitrary encoding | Dual-threshold catches most real secrets |
 | Command output leaks | PreToolUse can't see output | PostToolUse hook + MCP servers (auth stays server-side) |
 
-## Deny rules
+## Allow and deny rules
 
-`settings/recommended-deny.json` has 60 baseline deny patterns for Read/Write/Edit. These complement the hooks:
+`settings/recommended-deny.json` has 10 safe-to-allow patterns and 60 deny patterns. The allow list covers read-only Bash builtins (`cat`, `grep`, `ls`, `find`, etc.) and the built-in `Grep` tool. Note that `Bash(grep *)` and `Grep` are separate -- the former covers grep run via Bash, the latter covers Claude Code's native Grep tool (used for brace expansion, multi-file search). Both need entries to avoid approval prompts.
+
+These complement the hooks:
 
 | Layer | Protects against | Limitation |
 |-------|-----------------|------------|

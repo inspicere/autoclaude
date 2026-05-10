@@ -1,5 +1,17 @@
 {
   "permissions": {
+    "allow": [
+      "Bash(cat *)",
+      "Bash(echo *)",
+      "Bash(find *)",
+      "Bash(grep *)",
+      "Bash(head *)",
+      "Bash(ls *)",
+      "Bash(pwd *)",
+      "Bash(tail *)",
+      "Bash(wc *)",
+      "Grep"
+    ],
     "deny": [
       "Read(**/.env*)",
       "Read(**/.dev.vars*)",
