@@ -24,7 +24,7 @@ Claude Code stores session transcripts as JSONL files under `~/.claude/projects/
 
 ## Requirements
 
-Python 3.8+ (stdlib only, no dependencies).
+Python 3.11+ (stdlib only, no dependencies).
 
 ## Usage
 
@@ -191,6 +191,18 @@ python3 claude-approval-report.py --warns --since 7d
 ```
 
 Reads `~/.claude/hook-audit.jsonl` for `decision: "warn"` records from the PostToolUse hook, cross-references with session JSONL data to determine whether the user approved or rejected each warning. Displays a table with timestamp, command, reason, and user decision (APPROVED/REJECTED/no session match). Composes with `--since`.
+
+### Secret exposure analysis
+
+```
+# Detailed report of all detected secret exposures with risk classification
+python3 claude-approval-report.py --secrets
+
+# Combine with time filter
+python3 claude-approval-report.py --secrets --since 7d
+```
+
+Shows each flagged command with exposure risk classification: **exposed** (literal secret in command text), **runtime** (secret expanded at execution time), **variable** (variable reference that may contain a secret), or **pipe-safe** (secret passed through a pipe and not exposed in session). Composes with `--since` and `--project`.
 
 ## CI/CD
 
