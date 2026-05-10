@@ -118,24 +118,31 @@ When `HOOK_CORRELATE=1` (default): after standard pattern scanning, reads recent
 - `git diff`/`log`/`show` (reviewing code with regex patterns)
 - Reading project files that contain pattern definitions (this hook, block-secrets.py, README, etc.)
 
-## Known bypasses (Round 3 red team, 2026-05-10) — OPEN
+## Known bypasses (Round 3 red team, 2026-05-10) — ALL FIXED
 
-10 confirmed bypasses found by 8 parallel agents (4 Opus, 4 Sonnet). All extracted full target file contents with zero PostToolUse warnings triggered. No fixes applied yet.
+10 confirmed bypasses found by 8 parallel agents (4 Opus, 4 Sonnet). All remediated. 25 analysis-only findings identified, 10 fixed, 15 remaining (architectural gaps).
 
-| ID | Severity | Vector | Root cause |
-|----|----------|--------|------------|
-| C1 | Critical | `git diff --no-index /dev/null <target>` | git not in any detection set; PostToolUse exempts git diff output |
-| C2 | Critical | `BASH_ENV=<target> bash -c 'echo $VAR'` | `_strip_prefixes()` strips env assignments without checking path values |
-| C3 | Critical | `env --split-string='cat <target>'` | env wrapper stripping ignores `-S`/`--split-string` command arg |
-| H1 | High | `setsid cat <target>` | Not in `_COMMAND_WRAPPERS` |
-| H2 | High | `flock /tmp/x cat <target>` | Not in `_COMMAND_WRAPPERS` |
-| H3 | High | `unshare --map-root-user cat <target>` | Not in `_COMMAND_WRAPPERS` |
-| H4 | High | `find <dir> -name ".env" -exec cat {} \;` | grep-family handler skips `-exec`, never parses sub-command |
-| H5 | High | `coproc cat <target>` | `coproc` not recognized as keyword or wrapper |
-| H6 | High | `echo <target> \| xargs -I{} sh -c 'cat "{}"'` | xargs handler doesn't recognize sh/bash as indirect executors |
-| H7 | High | `for f in <target>; do cat "$f"; done` | for-loop variable assignment not tracked |
+| ID | Severity | Vector | Fix |
+|----|----------|--------|-----|
+| C1 | ~~Critical~~ | `git diff --no-index /dev/null <target>` | Added git handler for `diff --no-index`, `hash-object`, `add`, `archive` |
+| C2 | ~~Critical~~ | `BASH_ENV=<target> bash -c 'echo $VAR'` | Added `_DANGEROUS_ENV_VARS` set + `_check_dangerous_env_prefixes()` |
+| C3 | ~~Critical~~ | `env --split-string='cat <target>'` | Added `_check_env_split_string()` with 6 regex patterns |
+| H1 | ~~High~~ | `setsid cat <target>` | Added to `_COMMAND_WRAPPERS` |
+| H2 | ~~High~~ | `flock /tmp/x cat <target>` | Added to `_COMMAND_WRAPPERS` with `_FLOCK_VALUE_FLAGS` |
+| H3 | ~~High~~ | `unshare --map-root-user cat <target>` | Added to `_COMMAND_WRAPPERS` |
+| H4 | ~~High~~ | `find <dir> -name ".env" -exec cat {} \;` | Rewrote find handler with `in_exec` state tracking |
+| H5 | ~~High~~ | `coproc cat <target>` | Added `coproc` to `_COMMAND_WRAPPERS` |
+| H6 | ~~High~~ | `echo <target> \| xargs -I{} sh -c 'cat "{}"'` | Extended xargs to detect shell interpreters |
+| H7 | ~~High~~ | `for f in <target>; do cat "$f"; done` | Added `_RE_FOR_LOOP` + for-loop variable tracking |
 
-25 additional analysis-only findings were identified but not yet validated.
+## 2026-05-10 project audit findings
+
+A 12-dimension project audit identified 2 High, 5 Medium, 6 Low, 5 Info findings. The High findings concern PostToolUse hook weaknesses:
+
+1. **PostToolUse exempt pattern bypass** (High): `_EXEMPT_COMMANDS` regex uses substring matching. A command like `python3 /tmp/evil-block-secrets.py` is incorrectly exempted. The grep-family exemption exempts ALL grep commands, so `grep -r password /etc/shadow` output is not scanned.
+2. **No negative tests for PostToolUse exempt bypass** (High): Only 15 tests vs 541 for PreToolUse. No adversarial testing of exempt patterns.
+
+See CLAUDE.md for full finding list and remediation recommendations.
 
 ## Known limitations
 
