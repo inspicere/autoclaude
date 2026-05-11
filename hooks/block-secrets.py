@@ -16,11 +16,14 @@ Install by adding to hooks in ~/.claude/settings.json:
 Blocks by exiting with code 2 (stderr shown to user). Exits 0 to allow.
 """
 
+import sys
+if sys.version_info < (3, 11):
+    sys.exit("Error: Python 3.11+ required. Found " + ".".join(map(str, sys.version_info[:3])))
+
 import json
 import math
 import os
 import re
-import sys
 import time
 
 _DEBUG = os.environ.get("HOOK_DEBUG", "") == "1"

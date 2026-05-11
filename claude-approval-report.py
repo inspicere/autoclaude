@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """Analyze Claude Code session data to find which commands required the most user approval."""
 
+import sys
+if sys.version_info < (3, 11):
+    sys.exit("Error: Python 3.11+ required. Found " + ".".join(map(str, sys.version_info[:3])))
+
 import argparse
 import json
 import math
 import os
 import re
-import sys
 import tempfile
 from collections import defaultdict, Counter
 from datetime import datetime, timedelta, timezone
