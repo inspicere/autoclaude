@@ -111,7 +111,8 @@ def _is_exempt_command(command):
     return False
 
 _EXEMPT_FILE_PATHS = re.compile(
-    r'(?:block-secrets|claude-approval-report|warn-secrets|README|CLAUDE\.md)'
+    r'(?:^|/)(?:block-secrets|claude-approval-report|warn-secrets(?:-output)?)\.py$'
+    r'|(?:^|/)(?:README|CLAUDE)\.md$'
 )
 
 

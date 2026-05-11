@@ -41,8 +41,11 @@ def _audit_log(decision, tool_name, summary="", reason="", command="",
     """Append a structured JSON record to the audit log."""
     if not _AUDIT:
         return
-    if decision == "block" and command:
-        command = _PREFIXED_TOKEN_PATTERNS.sub('<REDACTED>', command)[:200]
+    if command:
+        command = _PREFIXED_TOKEN_PATTERNS.sub('<REDACTED>', command)
+        command = _RE_JWT.sub('<REDACTED-JWT>', command)
+        command = _RE_SECRET_ASSIGN.sub(lambda m: f'{m.group(1)}=<REDACTED>', command)
+        command = command[:500 if decision != "block" else 200]
     record = {
         "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "decision": decision,
@@ -223,10 +226,10 @@ _INTERPRETERS = frozenset({
     'expect',
 })
 
-_RE_COMMAND_SUBST = re.compile(r'\$\((.+?)\)', re.DOTALL)
-_RE_PROC_SUBST = re.compile(r'<\((.+?)\)', re.DOTALL)
-_RE_OUTPUT_PROC_SUBST = re.compile(r'>\((.+?)\)', re.DOTALL)
-_RE_BACKTICK_SUBST = re.compile(r'`(.+?)`', re.DOTALL)
+_RE_COMMAND_SUBST = re.compile(r'\$\(([^)]+)\)')
+_RE_PROC_SUBST = re.compile(r'<\(([^)]+)\)')
+_RE_OUTPUT_PROC_SUBST = re.compile(r'>\(([^)]+)\)')
+_RE_BACKTICK_SUBST = re.compile(r'`([^`]+)`')
 
 _SENSITIVE_DIRS_RE = re.compile(
     r'(?:^|/)\.(?:ssh|gnupg|aws|kube|docker)/?$'
@@ -235,17 +238,19 @@ _SENSITIVE_DIRS_RE = re.compile(
 _RE_STDIN_REDIRECT = re.compile(r'(?<!<)<(?!<)\s*([^\s<>&|;]+)')
 
 _RE_SHELL_EXEC = re.compile(
-    r'\b(?:bash|sh|zsh)\s+-c\s+["\'](.+?)["\']'
+    r"""\b(?:bash|sh|zsh)\s+-c\s+'([^']+)'"""
+    r'|'
+    r'''\b(?:bash|sh|zsh)\s+-c\s+"([^"]+)"'''
     r'|'
     r'\b(?:bash|sh|zsh)\s+-c\s+(\S+)',
-    re.DOTALL,
 )
 
 _RE_EVAL = re.compile(
-    r'\beval\s+["\'](.+?)["\']'
+    r"""\beval\s+'([^']+)'"""
+    r'|'
+    r'''\beval\s+"([^"]+)"'''
     r'|'
     r'\beval\s+(.+)',
-    re.DOTALL,
 )
 
 _RE_HEREDOC = re.compile(
@@ -1074,7 +1079,7 @@ def _check_single_command_access(command):
     if base == 'eval':
         m = _RE_EVAL.search(cmd)
         if m:
-            inner = m.group(1) or m.group(2)
+            inner = m.group(1) or m.group(2) or m.group(3)
             if inner:
                 result = _check_single_command_access(inner)
                 if result:
@@ -1116,7 +1121,7 @@ def _check_single_command_access(command):
                     return f"SSH remote command accesses sensitive file: {arg}"
 
     for m in _RE_SHELL_EXEC.finditer(cmd):
-        inner = m.group(1) or m.group(2)
+        inner = m.group(1) or m.group(2) or m.group(3)
         if inner:
             inner_cmds = _split_shell_commands(inner)
             # Track variable assignments within the subshell content

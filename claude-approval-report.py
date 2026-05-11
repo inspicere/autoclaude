@@ -569,14 +569,24 @@ def get_tool_full_command(tool_name, tool_input):
     return ""
 
 
+_MAX_SESSION_SIZE = 100 * 1024 * 1024  # 100 MB
+
+
 def process_session(jsonl_path, allow_patterns, project_name):
     """Process a single session JSONL file. Returns list of tool call records."""
     records = []
 
     try:
+        size = os.path.getsize(jsonl_path)
+        if size > _MAX_SESSION_SIZE:
+            print(f"  Skipping {os.path.basename(jsonl_path)}: {size // (1024*1024)}MB exceeds limit",
+                  file=sys.stderr)
+            return records
         with open(jsonl_path) as f:
             lines = list(f)
-    except Exception:
+    except (OSError, UnicodeDecodeError) as e:
+        print(f"  Warning: cannot read {os.path.basename(jsonl_path)}: {e}",
+              file=sys.stderr)
         return records
 
     objects = []
@@ -662,6 +672,12 @@ def process_session(jsonl_path, allow_patterns, project_name):
 
             original_cmd = tool_input.get("command", "") if tool_name == "Bash" else ""
 
+            secret_category = None
+            exposure_risk = None
+            if has_secrets and not is_rejected:
+                secret_category = _categorize_secret(original_cmd)
+                exposure_risk, _ = _classify_exposure_risk(original_cmd, secret_category)
+
             records.append({
                 "project": project_name,
                 "session": os.path.basename(jsonl_path),
@@ -674,7 +690,8 @@ def process_session(jsonl_path, allow_patterns, project_name):
                 "risk": risk,
                 "timestamp": obj.get("timestamp", ""),
                 "_has_secrets": has_secrets,
-                "_original_command": original_cmd,
+                "_secret_category": secret_category,
+                "_exposure_risk": exposure_risk,
             })
 
     return records
@@ -723,7 +740,7 @@ def _find_secret_exposures(records):
 
     Returns list of (record, category) tuples where category is one of:
     token, jwt, private_key, auth_header, secret_assign, high_entropy.
-    Uses _original_command (unredacted) for accurate categorization.
+    Uses pre-computed _secret_category from process_session.
     """
     results = []
     for r in records:
@@ -734,8 +751,9 @@ def _find_secret_exposures(records):
         if not r.get("_has_secrets"):
             continue
 
-        cmd = r.get("_original_command", r["tool_input"].get("command", ""))
-        results.append((r, _categorize_secret(cmd)))
+        category = r.get("_secret_category")
+        if category:
+            results.append((r, category))
 
     return results
 
@@ -744,8 +762,7 @@ def _count_secret_exposures(records):
     """Count records where secrets were actually exposed in command text."""
     exposed = 0
     for r, category in _find_secret_exposures(records):
-        cmd = r.get("_original_command", r["tool_input"].get("command", ""))
-        risk, _ = _classify_exposure_risk(cmd, category)
+        risk = r.get("_exposure_risk", "exposed")
         if risk == "exposed":
             exposed += 1
     return exposed
@@ -1486,10 +1503,7 @@ def render_trend(all_records, bucket="day", out=None):
         if risk in ("destructive", "mutating", "read-only"):
             b[risk] += 1
         if r.get("_has_secrets") and not r["rejected"]:
-            cmd = r.get("_original_command", r["tool_input"].get("command", ""))
-            cat = _categorize_secret(cmd)
-            risk_level, _ = _classify_exposure_risk(cmd, cat)
-            if risk_level == "exposed":
+            if r.get("_exposure_risk") == "exposed":
                 b["secrets"] += 1
 
     if not buckets:
@@ -1764,12 +1778,11 @@ def render_secrets(all_records, out=None):
     rows = []
 
     for r, category in exposures:
-        cmd = r.get("_original_command", r["tool_input"].get("command", ""))
-        risk_level, explanation = _classify_exposure_risk(cmd, category)
+        risk_level = r.get("_exposure_risk", "exposed")
         by_risk[risk_level] += 1
         by_category[category] += 1
         by_project[short_project_name(r["project"])] += 1
-        rows.append((r, category, risk_level, explanation))
+        rows.append((r, category, risk_level))
 
     # Summary
     _print(f"  By exposure risk:")
@@ -1810,7 +1823,7 @@ def render_secrets(all_records, out=None):
     _print(f"  {'Timestamp':<18s} {'Risk':<10s} {'Category':<14s} {'Project':<14s} Command")
     _print(f"  {'—'*86}")
 
-    for r, category, risk_level, explanation in rows:
+    for r, category, risk_level in rows:
         ts = r.get("timestamp", "")
         try:
             dt = datetime.fromisoformat(ts)
@@ -2050,7 +2063,21 @@ def resolve_session(session_arg, project_filter=None):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Analyze Claude Code approval data")
+    parser = argparse.ArgumentParser(
+        description="Analyze Claude Code approval data",
+        epilog=(
+            "examples:\n"
+            "  %(prog)s --summary              compact dashboard\n"
+            "  %(prog)s --trend 7d              daily trend, last week\n"
+            "  %(prog)s --why 'git push'        diagnose a specific command\n"
+            "  %(prog)s --secrets --since 7d    secret exposure report\n"
+            "  %(prog)s --apply --dry-run       preview allowlist changes\n"
+            "  %(prog)s --generate-settings     deny rules + hook config\n"
+            "\n"
+            "full reference: docs/cli-reference.md"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument(
         "-o", "--output",
         nargs="?",

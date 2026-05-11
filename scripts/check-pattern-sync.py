@@ -5,6 +5,7 @@ Extracts named regex patterns from each file, strips comments and whitespace,
 and verifies they are identical. Exits 1 on drift.
 """
 
+import json
 import os
 import re
 import sys
@@ -21,6 +22,11 @@ TOKEN_PATTERNS = ["_PREFIXED_TOKEN_PATTERNS", "_RE_JWT"]
 
 PAIR_CHECKS = [
     ("_SENSITIVE_PATH_RE", ["hooks/block-secrets.py", "hooks/landlock-sandbox.py"]),
+]
+
+SETTINGS_SYNC = [
+    ("BASELINE_SAFE_ALLOW", "allow"),
+    ("BASELINE_DENY_RULES", "deny"),
 ]
 
 
@@ -68,6 +74,52 @@ def check_group(var_name, files):
     return len(files), drift
 
 
+def extract_python_list(source, var_name):
+    """Extract a Python list literal from source, returning sorted list of strings."""
+    pattern = re.compile(
+        rf'^{re.escape(var_name)}\s*=\s*\[(.*?)\]',
+        re.MULTILINE | re.DOTALL,
+    )
+    m = pattern.search(source)
+    if not m:
+        return None
+    raw = m.group(1)
+    return sorted(s.strip().strip('"').strip("'") for s in raw.split(',') if s.strip().strip('"').strip("'"))
+
+
+def check_settings_sync():
+    """Check BASELINE lists in main script match recommended-deny.json. Returns (checks, drift)."""
+    script_path = os.path.join(REPO_ROOT, "claude-approval-report.py")
+    json_path = os.path.join(REPO_ROOT, "settings", "recommended-deny.json")
+    drift = False
+    checks = 0
+
+    with open(script_path) as f:
+        script_source = f.read()
+    with open(json_path) as f:
+        settings = json.load(f)
+
+    for var_name, json_key in SETTINGS_SYNC:
+        checks += 1
+        script_list = extract_python_list(script_source, var_name)
+        json_list = sorted(settings.get("permissions", {}).get(json_key, []))
+        if script_list is None:
+            print(f"FAIL: {var_name} not found in claude-approval-report.py")
+            drift = True
+            continue
+        if script_list != json_list:
+            only_script = set(script_list) - set(json_list)
+            only_json = set(json_list) - set(script_list)
+            print(f"DRIFT: {var_name} differs from settings/recommended-deny.json [{json_key}]")
+            if only_script:
+                print(f"  Only in script: {only_script}")
+            if only_json:
+                print(f"  Only in JSON: {only_json}")
+            drift = True
+
+    return checks, drift
+
+
 def main():
     total_checks = 0
     any_drift = False
@@ -83,6 +135,11 @@ def main():
         total_checks += checks
         if drift:
             any_drift = True
+
+    checks, drift = check_settings_sync()
+    total_checks += checks
+    if drift:
+        any_drift = True
 
     if any_drift:
         print(f"\n0/{total_checks} passed")
