@@ -115,7 +115,7 @@ Three rounds of multi-agent adversarial testing (8 parallel agents per round, mi
 
 ## CI/CD
 
-Forgejo Actions runs 741 tests across 10 suites on every push. Failures are reported to DefectDojo. See `.forgejo/workflows/test.yml`.
+Forgejo Actions runs 789 tests across 11 suites on every push. Failures are reported to DefectDojo. See `.forgejo/workflows/test.yml`.
 
 ## Docs
 

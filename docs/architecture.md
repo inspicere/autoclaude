@@ -76,10 +76,10 @@ This document shows how the protection layers in this project fit together, usin
 | `vault kv get` (output has secrets) | — | — | **warns** | **safe path** |
 | Need to read a Vault secret | — | — | — | **safe path** |
 | Need to query Forgejo API | — | — | — | **safe path** |
-| `grep PASSWORD .env` | allowed | exempt | exempt | — |
+| `grep PASSWORD .env` | allowed | exempt | **scanned** | — |
 | `$TOKEN` variable reference | allowed | exempt | — | — |
 
-**Known gap (2026-05-10 audit):** PostToolUse exempt patterns use substring matching, so grep-family output and commands whose names contain exempted substrings (e.g. `block-secrets`) are not scanned. This makes PostToolUse the weakest layer in the defense stack. PreToolUse has 541 tests and 3 rounds of red teaming; PostToolUse has 15 tests and no adversarial testing.
+**Hardened (2026-05-10):** PostToolUse exempt patterns were tightened from substring matching to basename-validated function-based exemptions (commit `079ba26`). Grep-family output is now scanned for token patterns. 48 adversarial tests added. PostToolUse now has 63 tests (15 unit + 48 adversarial) across 2 suites.
 
 ## Homelab deployment
 

@@ -114,9 +114,13 @@ When `HOOK_CORRELATE=1` (default): after standard pattern scanning, reads recent
 
 ### Exemptions
 
-- Grep-family commands (pattern definitions in output)
-- `git diff`/`log`/`show` (reviewing code with regex patterns)
-- Reading project files that contain pattern definitions (this hook, block-secrets.py, README, etc.)
+- Reading known project files (block-secrets.py, warn-secrets-output.py, claude-approval-report.py, test suites) -- validated by script basename against `_EXEMPT_SCRIPT_NAMES` frozenset, not substring matching
+- Reading project documentation files (README, CLAUDE.md, hooks.md) -- validated by `_EXEMPT_READ_TARGETS` regex matching full file path
+- Test file output -- validated by `_RE_TEST_FILE_PATH` regex requiring `hooks/` or `tests/` path prefix
+
+**No longer exempted (as of 2026-05-10):**
+- Grep-family commands -- output is now scanned for token patterns (grep may dump file contents via `grep . file`)
+- `git diff`/`log`/`show` -- output is now scanned for known token patterns
 
 ## Known bypasses (Round 3 red team, 2026-05-10) — ALL FIXED
 
@@ -135,14 +139,14 @@ When `HOOK_CORRELATE=1` (default): after standard pattern scanning, reads recent
 | H6 | ~~High~~ | `echo <target> \| xargs -I{} sh -c 'cat "{}"'` | Extended xargs to detect shell interpreters |
 | H7 | ~~High~~ | `for f in <target>; do cat "$f"; done` | Added `_RE_FOR_LOOP` + for-loop variable tracking |
 
-## 2026-05-10 project audit findings
+## 2026-05-10 project audit findings -- BOTH HIGH FINDINGS FIXED
 
-A 12-dimension project audit identified 2 High, 5 Medium, 6 Low, 5 Info findings. The High findings concern PostToolUse hook weaknesses:
+A 12-dimension project audit identified 2 High, 5 Medium, 6 Low, 5 Info findings. Both High findings have been remediated (commit `079ba26`):
 
-1. **PostToolUse exempt pattern bypass** (High): `_EXEMPT_COMMANDS` regex uses substring matching. A command like `python3 /tmp/evil-block-secrets.py` is incorrectly exempted. The grep-family exemption exempts ALL grep commands, so `grep -r password /etc/shadow` output is not scanned.
-2. **No negative tests for PostToolUse exempt bypass** (High): Only 15 tests vs 541 for PreToolUse. No adversarial testing of exempt patterns.
+1. ~~**PostToolUse exempt pattern bypass** (High)~~: Replaced `_EXEMPT_COMMANDS` substring-matching regex with `_is_exempt_command()` function that validates script path basename against `_EXEMPT_SCRIPT_NAMES` frozenset. Grep-family blanket exemption removed -- output now scanned for token patterns.
+2. ~~**No negative tests for PostToolUse exempt bypass** (High)~~: Added `hooks/test_warn_output_adversarial.py` with 48 adversarial tests in 6 categories (exempt bypass, grep bypass, legitimate exemptions, secret detection, no false positives, edge cases).
 
-See CLAUDE.md for full finding list and remediation recommendations.
+Remaining Medium findings (not yet addressed): Python version runtime check, shared sensitive path regex CI cross-check, audit log privacy docs, settings.local.json cleanup.
 
 ## Known limitations
 

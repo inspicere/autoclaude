@@ -62,7 +62,7 @@ Warn-level confidence grading: `_classify_leak_confidence()` estimates whether a
 
 ## PostToolUse hook (`hooks/warn-secrets-output.py`)
 
-A self-contained PostToolUse hook that scans tool output for leaked secrets (known token patterns, JWTs, private key headers). Cannot prevent the leak but emits `decision: "block"` with a warning to avoid using the values and advise credential rotation. Scans Bash command output, Read tool output, and Edit tool output. Exempts grep-family commands, git diff/log/show output, and Python/test script output (running the hook's own test suite).
+A self-contained PostToolUse hook that scans tool output for leaked secrets (known token patterns, JWTs, private key headers). Cannot prevent the leak but emits `decision: "block"` with a warning to avoid using the values and advise credential rotation. Scans Bash command output, Read tool output, and Edit tool output. Exempts only known project script basenames (validated via `_is_exempt_command()` with `_EXEMPT_SCRIPT_NAMES` frozenset), project documentation files (via `_EXEMPT_READ_TARGETS` regex), and test file output (via `_RE_TEST_FILE_PATH` with path prefix validation). Grep-family and git diff/log/show output are now scanned for token patterns (blanket exemptions removed 2026-05-10).
 
 PreToolUse correlation (`HOOK_CORRELATE=1`, on by default): after standard pattern scanning, reads recent warn entries from the PreToolUse audit log, extracts flagged variable names, and checks command output for high-entropy strings that could be expanded secret values. Triggers a stronger warning when a secret that was flagged before execution appears in output. Set `HOOK_CORRELATE=0` to disable.
 
