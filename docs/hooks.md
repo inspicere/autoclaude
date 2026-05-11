@@ -86,7 +86,7 @@ These appear as `FALSE-POS` in the secrets report and are excluded from the Sec 
 | `HOOK_DEBUG` | `0` | `1` = emit debug trace to stderr |
 | `HOOK_AUDIT` | `1` | `1` = write JSONL to `~/.claude/hook-audit.jsonl` |
 
-Audit log: structured JSONL with timestamp, decision, tool, summary, reason, command. Atomic appends (O_APPEND), 0600 permissions, auto-rotates at 5MB. Secrets are redacted in block-event entries.
+Audit log: structured JSONL with timestamp, decision, tool, summary, reason, command. Atomic appends (O_APPEND), 0600 permissions, auto-rotates at 5MB. Secrets are redacted in all entries (known token patterns, JWTs, and secret variable assignments).
 
 #### Audit log data surface and retention
 
@@ -101,11 +101,11 @@ Audit log: structured JSONL with timestamp, decision, tool, summary, reason, com
 | `tool` | Tool name (Bash, Read, etc.) | — |
 | `summary` | Short description of action | May contain file paths |
 | `reason` | Why the decision was made | May contain partial command text |
-| `command` | Full Bash command (block/warn only) | **May contain sensitive args** (passwords, file paths, hostnames) |
+| `command` | Full Bash command (all decisions) | **Redacted** but may contain non-pattern-matched sensitive args |
 
-**What is NOT logged:** tool output, file contents, Read/Edit results. Only the command (input side) is captured, and only for block/warn events. Allow events log summary only, not the full command.
+**What is NOT logged:** tool output, file contents, Read/Edit results. Only the command (input side) is captured.
 
-**Secret redaction:** Known token patterns are replaced with `<REDACTED>` in the `command` field before writing. However, secrets that don't match a known pattern (e.g., short passwords, custom tokens) may appear unredacted.
+**Secret redaction:** All audit entries (block, warn, and allow) have the `command` field redacted before writing. Known token patterns → `<REDACTED>`, JWTs → `<REDACTED-JWT>`, secret variable assignments → `VAR_NAME=<REDACTED>`. Secrets that don't match a known pattern (e.g., short passwords, custom tokens) may still appear.
 
 **Retention:** The log auto-rotates at 5MB (renamed to `.1` backup). No automatic deletion or expiry. On a typical workstation with moderate Claude Code usage, this reaches 5MB in weeks to months.
 
@@ -166,22 +166,27 @@ When `HOOK_CORRELATE=1` (default): after standard pattern scanning, reads recent
 | H6 | ~~High~~ | `echo <target> \| xargs -I{} sh -c 'cat "{}"'` | Extended xargs to detect shell interpreters |
 | H7 | ~~High~~ | `for f in <target>; do cat "$f"; done` | Added `_RE_FOR_LOOP` + for-loop variable tracking |
 
-## 2026-05-10 project audit findings -- BOTH HIGH FINDINGS FIXED
+## 2026-05-10 project audit findings (first) — ALL RESOLVED
 
-A 12-dimension project audit identified 2 High, 5 Medium, 6 Low, 5 Info findings. Both High findings have been remediated (commit `079ba26`):
+A 12-dimension project audit identified 2 High, 5 Medium, 6 Low, 5 Info findings. All resolved in commit `079ba26`.
 
-1. ~~**PostToolUse exempt pattern bypass** (High)~~: Replaced `_EXEMPT_COMMANDS` substring-matching regex with `_is_exempt_command()` function that validates script path basename against `_EXEMPT_SCRIPT_NAMES` frozenset. Grep-family blanket exemption removed -- output now scanned for token patterns.
-2. ~~**No negative tests for PostToolUse exempt bypass** (High)~~: Added `hooks/test_warn_output_adversarial.py` with 48 adversarial tests in 6 categories (exempt bypass, grep bypass, legitimate exemptions, secret detection, no false positives, edge cases).
+## 2026-05-10 project audit findings (second) — ALL CRITICAL/HIGH/MEDIUM FIXED
 
-Additional Medium findings addressed:
-3. ~~**Python version runtime check** (Medium)~~: Added `sys.version_info < (3, 11)` guard to all three scripts (main, PreToolUse, PostToolUse) with clear error message.
-4. ~~**Shared sensitive path regex CI cross-check** (Medium)~~: Added `scripts/check-pattern-sync.py` that extracts and compares `_PREFIXED_TOKEN_PATTERNS` and `_RE_JWT` across all three files. Integrated into CI runner.
-5. ~~**Audit log data surface documentation** (Medium)~~: Added data surface and retention section to this file documenting fields, privacy notes, redaction behavior, and retention recommendations.
+A comprehensive 12-dimension project audit (Application + Claude Code overlays) identified 1 Critical, 3 High, 7 Medium, 5 Low, 6 Info findings. All Critical, High, and Medium findings remediated in commit `65fff09`.
 
-6. ~~**settings.local.json cleanup** (Low)~~: Removed overly broad allow patterns (`Bash(python3 *)`, `Bash(git *)`, `Bash(bash *)`, red team artifacts). Replaced with specific test runner and hook patterns.
-7. ~~**Landlock _SENSITIVE_PATH_RE divergence** (Medium, DefectDojo #2061)~~: Widened `.aws/` pattern in block-secrets.py to match landlock-sandbox.py; added `_SENSITIVE_PATH_RE` to CI pattern sync checker.
+**Critical (1):**
+1. ~~**ReDoS in command substitution regexes** (Critical)~~: `.+?` inside `\$\(...\)` caused exponential backtracking on crafted input. Replaced with character-class `[^)]+`/`[^`]+` in `_RE_COMMAND_SUBST`, `_RE_PROC_SUBST`, `_RE_OUTPUT_PROC_SUBST`, `_RE_BACKTICK_SUBST`.
 
-All audit findings resolved.
+**High (3):**
+2. ~~**ReDoS in `_RE_SHELL_EXEC` and `_RE_EVAL`** (High)~~: Same backtracking class. Split into separate single/double-quote branches with character-class matchers.
+3. ~~**Audit log stored unredacted commands for allow/warn entries** (High)~~: Redaction now applied to all decisions (block, warn, allow) — tokens, JWTs, and secret assignments all redacted.
+4. ~~**PostToolUse `_EXEMPT_FILE_PATHS` path-substring bypass** (High)~~: Regex matched anywhere in path string. Anchored to basename with extension check.
+
+**Medium (4):**
+5. ~~**No size guard on JSONL parsing** (Medium)~~: Added 100MB limit and specific exception handling (`OSError`, `UnicodeDecodeError`).
+6. ~~**No deny/allow list sync in CI** (Medium)~~: Extended `check-pattern-sync.py` to verify `BASELINE_SAFE_ALLOW`/`BASELINE_DENY_RULES` match `settings/recommended-deny.json`. 10 CI checks total.
+7. ~~**Minimal `--help` output** (Medium)~~: Added usage examples and `docs/cli-reference.md` pointer to argparse epilog.
+8. ~~**Unredacted `_original_command` in records** (Medium)~~: Pre-compute secret classification at parse time, removed `_original_command` field from records.
 
 ## Known limitations
 
