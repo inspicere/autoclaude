@@ -180,9 +180,6 @@ _FILE_READERS = frozenset({
 # Maps command name -> set of flags whose next argument is a file path
 _FILE_FLAG_ARGS = {
     'openssl': {'-in', '-inkey', '-certfile', '-CAfile'},
-    'ansible-vault': {'--vault-password-file', '--vault-pass-file'},
-    'ansible-playbook': {'--vault-password-file', '--vault-pass-file'},
-    'ansible': {'--vault-password-file', '--vault-pass-file'},
     'gpg': {'--keyring', '--secret-keyring', '--output'},
     'gpg2': {'--keyring', '--secret-keyring', '--output'},
     'age': {'-i', '--identity', '-o', '--output'},
