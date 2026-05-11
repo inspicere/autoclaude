@@ -28,7 +28,7 @@ python3 claude-approval-report.py --warns --since 7d   # warns from the last wee
 python3 claude-approval-report.py -o           # write to auto-named timestamped file
 ```
 
-No dependencies beyond Python 3.11+ stdlib. Test suites: `tests/test_report.py` (155 tests for the main script's pure functions), `hooks/test_block_secrets.py` (67 tests), `hooks/test_bypass_fixes.py` (110 tests), `hooks/test_round2_bypass_fixes.py` (50 tests), `hooks/test_round3_bypass_fixes.py` (82 tests), `hooks/test_analysis_fixes.py` (68 tests), `hooks/test_fp_fixes.py` (28 tests), `hooks/test_infra_usability.py` (139 tests), `hooks/test_warn_secrets.py` (15 tests), `hooks/test_warn_mode.py` (30 tests), `hooks/test_warn_output_adversarial.py` (48 tests), `scripts/check-pattern-sync.py` (8 checks) — 800 total.
+No dependencies beyond Python 3.11+ stdlib. Test suites: `tests/test_report.py` (155 tests for the main script's pure functions), `hooks/test_block_secrets.py` (67 tests), `hooks/test_bypass_fixes.py` (110 tests), `hooks/test_round2_bypass_fixes.py` (50 tests), `hooks/test_round3_bypass_fixes.py` (82 tests), `hooks/test_analysis_fixes.py` (68 tests), `hooks/test_fp_fixes.py` (28 tests), `hooks/test_infra_usability.py` (139 tests), `hooks/test_warn_secrets.py` (15 tests), `hooks/test_warn_mode.py` (30 tests), `hooks/test_warn_output_adversarial.py` (48 tests), `scripts/check-pattern-sync.py` (10 checks) — 802 total.
 
 ## Architecture
 
@@ -85,7 +85,7 @@ Reference these docs when adding new secret patterns or modifying detection logi
 
 Two Forgejo Actions workflows run on push to `main` and on PRs:
 
-1. **`test.yml`** — runs all 12 test suites (800 tests). Results uploaded to DefectDojo as "Generic Findings Import" under engagement "CI Tests". Clean runs auto-close previous findings via `close_old_findings=true`.
+1. **`test.yml`** — runs all 12 test suites (802 tests). Results uploaded to DefectDojo as "Generic Findings Import" under engagement "CI Tests". Clean runs auto-close previous findings via `close_old_findings=true`.
 
 2. **`security-scan.yml`** — runs gitleaks (secret detection), semgrep (Python SAST), and trivy (filesystem vuln scan). Each scanner's native JSON output is uploaded to DefectDojo under engagement "Security Scans" using the scanner-specific import type. Gitleaks failures block the build; semgrep/trivy are informational. Test files are allowlisted in `.gitleaks.toml` to avoid false positives on intentional test fixture patterns.
 
@@ -93,7 +93,7 @@ Both use `node:22-slim` image on the `docker` runner label. Product: `autoclaude
 
 ## Known Issues (from 2026-05-10 round 3 red team engagement) — ALL 10 CONFIRMED BYPASSES FIXED
 
-A third multi-agent red team engagement on 2026-05-10 targeted the hooks with the same planted fake secret in `~/autoclaude_engagement_target/.env`. 8 parallel agents (4 Opus, 4 Sonnet) found 10 confirmed live bypasses (all extracted full file contents with zero PostToolUse warnings) plus 25 analysis-only findings. All 10 confirmed bypasses were remediated same-day. Hook grew from ~1183 to ~1324 lines, then to ~1450 lines with analysis-only fixes. 800 tests across 12 suites.
+A third multi-agent red team engagement on 2026-05-10 targeted the hooks with the same planted fake secret in `~/autoclaude_engagement_target/.env`. 8 parallel agents (4 Opus, 4 Sonnet) found 10 confirmed live bypasses (all extracted full file contents with zero PostToolUse warnings) plus 25 analysis-only findings. All 10 confirmed bypasses were remediated same-day. Hook grew from ~1183 to ~1324 lines, then to ~1450 lines with analysis-only fixes. 802 tests across 12 suites.
 
 ### Round 3 (2026-05-10) — ALL FIXED
 
