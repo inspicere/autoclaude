@@ -1,0 +1,219 @@
+name: Security Scan
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  security:
+    runs-on: docker
+    container:
+      image: node:22-slim
+
+    env:
+      GITLEAKS_VERSION: "8.24.3"
+      GITLEAKS_SHA256: "9991e0b2903da4c8f6122b5c3186448b927a5da4deef1fe45271c3793f4ee29c"
+      SEMGREP_VERSION: "1.99.0"
+      TRIVY_VERSION: "0.70.0"
+      TRIVY_SHA256: "a9f6ce99fa942759ee914d821b9ad38b6d6887e7d1b4d4415c1c9c7387c7bc94"
+
+    steps:
+      - name: Install tools
+        run: |
+          apt-get update -qq && apt-get install -y -qq python3 python3-pip curl git >/dev/null 2>&1
+
+          pip3 install --break-system-packages "semgrep==${SEMGREP_VERSION}" >/dev/null 2>&1
+
+          curl -sfL -o /tmp/trivy.deb \
+            "https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.deb"
+          echo "${TRIVY_SHA256}  /tmp/trivy.deb" | sha256sum -c --quiet
+          dpkg -i /tmp/trivy.deb >/dev/null 2>&1
+          rm /tmp/trivy.deb
+
+          curl -sfL -o /tmp/gitleaks.tar.gz \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          echo "${GITLEAKS_SHA256}  /tmp/gitleaks.tar.gz" | sha256sum -c --quiet
+          tar -xzf /tmp/gitleaks.tar.gz -C /usr/local/bin gitleaks
+          rm /tmp/gitleaks.tar.gz
+
+          mkdir -p /tmp/scan-results
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Gitleaks
+        id: gitleaks
+        run: |
+          gitleaks detect --source . --no-git \
+            --report-format json \
+            --report-path /tmp/scan-results/gitleaks.json \
+            2>/dev/null && GITLEAKS_EXIT=0 || GITLEAKS_EXIT=$?
+
+          if [ "$GITLEAKS_EXIT" -eq 0 ]; then
+            echo "Gitleaks: clean"
+            echo "gitleaks_clean=true" >> "$GITHUB_OUTPUT"
+          else
+            COUNT=$(python3 -c "import json; print(len(json.load(open('/tmp/scan-results/gitleaks.json'))))" 2>/dev/null || echo "?")
+            echo "Gitleaks: ${COUNT} finding(s)"
+            echo "gitleaks_clean=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Semgrep
+        run: |
+          timeout 300 semgrep scan --config auto --json --quiet . \
+            > /tmp/scan-results/semgrep.json 2>/dev/null || true
+
+          COUNT=$(python3 -c "
+          import json
+          d = json.load(open('/tmp/scan-results/semgrep.json'))
+          print(len(d.get('results', [])))
+          " 2>/dev/null || echo "?")
+          echo "Semgrep: ${COUNT} finding(s)"
+
+      - name: Trivy
+        run: |
+          timeout 120 trivy fs --severity HIGH,CRITICAL --quiet --no-progress \
+            --format json . > /tmp/scan-results/trivy.json 2>/dev/null || true
+
+          COUNT=$(python3 -c "
+          import json
+          d = json.load(open('/tmp/scan-results/trivy.json'))
+          total = sum(len(r.get('Vulnerabilities', [])) for r in d.get('Results', []))
+          print(total)
+          " 2>/dev/null || echo "?")
+          echo "Trivy: ${COUNT} finding(s)"
+
+      - name: Upload Gitleaks to DefectDojo
+        if: github.ref == 'refs/heads/main'
+        env:
+          DD_API_TOKEN: ${{ secrets.DEFECTDOJO_API_TOKEN }}
+          DEFECTDOJO_URL: https://defectdojo.internal.homelab.equipment
+        run: |
+          [ -f /tmp/scan-results/gitleaks.json ] || exit 0
+          SCAN_DATE=$(date -u +%Y-%m-%d)
+
+          HTTP_CODE=$(curl -sk -o /tmp/dd-response.json -w "%{http_code}" \
+            -X POST "${DEFECTDOJO_URL}/api/v2/reimport-scan/" \
+            -H "Authorization: Token ${DD_API_TOKEN}" \
+            -F "scan_type=Gitleaks Scan" \
+            -F "file=@/tmp/scan-results/gitleaks.json" \
+            -F "product_name=autoclaude" \
+            -F "product_type_name=Inspicere Projects" \
+            -F "engagement_name=Security Scans" \
+            -F "auto_create_context=true" \
+            -F "scan_date=${SCAN_DATE}" \
+            -F "active=true" \
+            -F "verified=true" \
+            -F "close_old_findings=true" \
+            -F "close_old_findings_product_scope=false" \
+            -F "deduplication_on_engagement=true")
+
+          if [ "$HTTP_CODE" -ge 400 ]; then
+            HTTP_CODE=$(curl -sk -o /tmp/dd-response.json -w "%{http_code}" \
+              -X POST "${DEFECTDOJO_URL}/api/v2/import-scan/" \
+              -H "Authorization: Token ${DD_API_TOKEN}" \
+              -F "scan_type=Gitleaks Scan" \
+              -F "file=@/tmp/scan-results/gitleaks.json" \
+              -F "product_name=autoclaude" \
+              -F "product_type_name=Inspicere Projects" \
+              -F "engagement_name=Security Scans" \
+              -F "auto_create_context=true" \
+              -F "scan_date=${SCAN_DATE}" \
+              -F "active=true" \
+              -F "verified=true")
+          fi
+          echo "Gitleaks upload: HTTP ${HTTP_CODE}"
+
+      - name: Upload Semgrep to DefectDojo
+        if: github.ref == 'refs/heads/main'
+        env:
+          DD_API_TOKEN: ${{ secrets.DEFECTDOJO_API_TOKEN }}
+          DEFECTDOJO_URL: https://defectdojo.internal.homelab.equipment
+        run: |
+          [ -f /tmp/scan-results/semgrep.json ] || exit 0
+          SCAN_DATE=$(date -u +%Y-%m-%d)
+
+          HTTP_CODE=$(curl -sk -o /tmp/dd-response.json -w "%{http_code}" \
+            -X POST "${DEFECTDOJO_URL}/api/v2/reimport-scan/" \
+            -H "Authorization: Token ${DD_API_TOKEN}" \
+            -F "scan_type=Semgrep JSON Report" \
+            -F "file=@/tmp/scan-results/semgrep.json" \
+            -F "product_name=autoclaude" \
+            -F "product_type_name=Inspicere Projects" \
+            -F "engagement_name=Security Scans" \
+            -F "auto_create_context=true" \
+            -F "scan_date=${SCAN_DATE}" \
+            -F "active=true" \
+            -F "verified=true" \
+            -F "close_old_findings=true" \
+            -F "close_old_findings_product_scope=false" \
+            -F "deduplication_on_engagement=true")
+
+          if [ "$HTTP_CODE" -ge 400 ]; then
+            HTTP_CODE=$(curl -sk -o /tmp/dd-response.json -w "%{http_code}" \
+              -X POST "${DEFECTDOJO_URL}/api/v2/import-scan/" \
+              -H "Authorization: Token ${DD_API_TOKEN}" \
+              -F "scan_type=Semgrep JSON Report" \
+              -F "file=@/tmp/scan-results/semgrep.json" \
+              -F "product_name=autoclaude" \
+              -F "product_type_name=Inspicere Projects" \
+              -F "engagement_name=Security Scans" \
+              -F "auto_create_context=true" \
+              -F "scan_date=${SCAN_DATE}" \
+              -F "active=true" \
+              -F "verified=true")
+          fi
+          echo "Semgrep upload: HTTP ${HTTP_CODE}"
+
+      - name: Upload Trivy to DefectDojo
+        if: github.ref == 'refs/heads/main'
+        env:
+          DD_API_TOKEN: ${{ secrets.DEFECTDOJO_API_TOKEN }}
+          DEFECTDOJO_URL: https://defectdojo.internal.homelab.equipment
+        run: |
+          [ -f /tmp/scan-results/trivy.json ] || exit 0
+          SCAN_DATE=$(date -u +%Y-%m-%d)
+
+          HTTP_CODE=$(curl -sk -o /tmp/dd-response.json -w "%{http_code}" \
+            -X POST "${DEFECTDOJO_URL}/api/v2/reimport-scan/" \
+            -H "Authorization: Token ${DD_API_TOKEN}" \
+            -F "scan_type=Trivy Scan" \
+            -F "file=@/tmp/scan-results/trivy.json" \
+            -F "product_name=autoclaude" \
+            -F "product_type_name=Inspicere Projects" \
+            -F "engagement_name=Security Scans" \
+            -F "auto_create_context=true" \
+            -F "scan_date=${SCAN_DATE}" \
+            -F "active=true" \
+            -F "verified=true" \
+            -F "close_old_findings=true" \
+            -F "close_old_findings_product_scope=false" \
+            -F "deduplication_on_engagement=true")
+
+          if [ "$HTTP_CODE" -ge 400 ]; then
+            HTTP_CODE=$(curl -sk -o /tmp/dd-response.json -w "%{http_code}" \
+              -X POST "${DEFECTDOJO_URL}/api/v2/import-scan/" \
+              -H "Authorization: Token ${DD_API_TOKEN}" \
+              -F "scan_type=Trivy Scan" \
+              -F "file=@/tmp/scan-results/trivy.json" \
+              -F "product_name=autoclaude" \
+              -F "product_type_name=Inspicere Projects" \
+              -F "engagement_name=Security Scans" \
+              -F "auto_create_context=true" \
+              -F "scan_date=${SCAN_DATE}" \
+              -F "active=true" \
+              -F "verified=true")
+          fi
+          echo "Trivy upload: HTTP ${HTTP_CODE}"
+
+      - name: Fail on leaked secrets
+        if: steps.gitleaks.outputs.gitleaks_clean == 'false'
+        run: |
+          echo "FAILED: Gitleaks detected secrets in the codebase"
+          cat /tmp/scan-results/gitleaks.json | python3 -c "
+          import json, sys
+          for f in json.load(sys.stdin):
+              print(f'  {f.get(\"RuleID\",\"?\")} in {f.get(\"File\",\"?\")}:{f.get(\"StartLine\",\"?\")}')
+          " 2>/dev/null || true
+          exit 1
