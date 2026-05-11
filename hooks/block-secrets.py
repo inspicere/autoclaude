@@ -130,6 +130,11 @@ _SAFE_PLACEHOLDERS = frozenset({
     'none', 'null',
 })
 
+_SAFE_SECRET_VAR_NAMES = frozenset({
+    'GIT_AUTHOR_NAME', 'GIT_AUTHOR_EMAIL', 'GIT_AUTHOR_DATE',
+    'GIT_COMMITTER_NAME', 'GIT_COMMITTER_EMAIL', 'GIT_COMMITTER_DATE',
+})
+
 _GREP_FAMILY = frozenset({
     'grep', 'egrep', 'fgrep', 'rg', 'ag', 'ack', 'find', 'sed', 'awk',
 })
@@ -420,7 +425,7 @@ def _check_command_secrets(command):
                 return ("curl --user contains inline credentials", "block")
 
     m = _RE_SECRET_ASSIGN.search(command)
-    if m:
+    if m and m.group(1).upper() not in _SAFE_SECRET_VAR_NAMES:
         val = m.group(2).strip("\"'")
         if val.startswith(('$(', '`')):
             return (f"{m.group(1)} will be set from a secret source at runtime", "warn")

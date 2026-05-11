@@ -230,6 +230,10 @@ bash('git stash pop', label='git stash pop')
 bash('git tag v1.0.0', label='git tag')
 bash('git remote -v', label='git remote -v')
 bash('git submodule update --init', label='git submodule update')
+bash('git filter-branch -f --env-filter \'export GIT_AUTHOR_NAME="newname"; export GIT_AUTHOR_EMAIL="new@example.com"\'',
+     label='git filter-branch with GIT_AUTHOR_NAME/EMAIL')
+bash('GIT_COMMITTER_NAME="newname" GIT_COMMITTER_EMAIL="new@example.com" git commit --amend --no-edit',
+     label='git commit with GIT_COMMITTER env vars')
 
 # =============================================================================
 # WRITE / EDIT TO NON-SENSITIVE PATHS
