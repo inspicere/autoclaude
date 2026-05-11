@@ -88,6 +88,33 @@ These appear as `FALSE-POS` in the secrets report and are excluded from the Sec 
 
 Audit log: structured JSONL with timestamp, decision, tool, summary, reason, command. Atomic appends (O_APPEND), 0600 permissions, auto-rotates at 5MB. Secrets are redacted in block-event entries.
 
+#### Audit log data surface and retention
+
+**Location:** `~/.claude/hook-audit.jsonl` (mode 0600, owner-only read/write).
+
+**Fields recorded per event:**
+
+| Field | Content | Privacy note |
+|-------|---------|-------------|
+| `ts` | ISO 8601 timestamp | Session timing |
+| `decision` | `block`, `warn`, or `allow` | — |
+| `tool` | Tool name (Bash, Read, etc.) | — |
+| `summary` | Short description of action | May contain file paths |
+| `reason` | Why the decision was made | May contain partial command text |
+| `command` | Full Bash command (block/warn only) | **May contain sensitive args** (passwords, file paths, hostnames) |
+
+**What is NOT logged:** tool output, file contents, Read/Edit results. Only the command (input side) is captured, and only for block/warn events. Allow events log summary only, not the full command.
+
+**Secret redaction:** Known token patterns are replaced with `<REDACTED>` in the `command` field before writing. However, secrets that don't match a known pattern (e.g., short passwords, custom tokens) may appear unredacted.
+
+**Retention:** The log auto-rotates at 5MB (renamed to `.1` backup). No automatic deletion or expiry. On a typical workstation with moderate Claude Code usage, this reaches 5MB in weeks to months.
+
+**Recommendations:**
+- Do not include `hook-audit.jsonl` in backups sent to untrusted storage
+- Periodically delete old logs: `rm ~/.claude/hook-audit.jsonl.1`
+- In shared environments, verify the file mode remains 0600
+- The `--warns` flag on `claude-approval-report.py` reads this log for analysis; it does not copy or transmit the data
+
 ### Warn mode
 
 Some commands get `decision: "warn"` instead of block. The user sees a warning but can still approve. This applies to:
@@ -146,7 +173,12 @@ A 12-dimension project audit identified 2 High, 5 Medium, 6 Low, 5 Info findings
 1. ~~**PostToolUse exempt pattern bypass** (High)~~: Replaced `_EXEMPT_COMMANDS` substring-matching regex with `_is_exempt_command()` function that validates script path basename against `_EXEMPT_SCRIPT_NAMES` frozenset. Grep-family blanket exemption removed -- output now scanned for token patterns.
 2. ~~**No negative tests for PostToolUse exempt bypass** (High)~~: Added `hooks/test_warn_output_adversarial.py` with 48 adversarial tests in 6 categories (exempt bypass, grep bypass, legitimate exemptions, secret detection, no false positives, edge cases).
 
-Remaining Medium findings (not yet addressed): Python version runtime check, shared sensitive path regex CI cross-check, audit log privacy docs, settings.local.json cleanup.
+Additional Medium findings addressed:
+3. ~~**Python version runtime check** (Medium)~~: Added `sys.version_info < (3, 11)` guard to all three scripts (main, PreToolUse, PostToolUse) with clear error message.
+4. ~~**Shared sensitive path regex CI cross-check** (Medium)~~: Added `scripts/check-pattern-sync.py` that extracts and compares `_PREFIXED_TOKEN_PATTERNS` and `_RE_JWT` across all three files. Integrated into CI runner.
+5. ~~**Audit log data surface documentation** (Medium)~~: Added data surface and retention section to this file documenting fields, privacy notes, redaction behavior, and retention recommendations.
+
+Remaining: settings.local.json cleanup (Low).
 
 ## Known limitations
 

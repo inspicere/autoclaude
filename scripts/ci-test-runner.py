@@ -25,6 +25,7 @@ SUITES = [
     ("hooks/test_warn_secrets.py", "Warn Secrets Output Tests"),
     ("hooks/test_warn_mode.py", "Warn Mode Tests"),
     ("hooks/test_warn_output_adversarial.py", "PostToolUse Adversarial Tests"),
+    ("scripts/check-pattern-sync.py", "Token Pattern Sync Check"),
 ]
 
 _RE_RESULTS_SLASH = re.compile(r'(\d+)/(\d+)\s+passed')
