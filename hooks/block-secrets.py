@@ -146,7 +146,7 @@ _SENSITIVE_PATH_RE = re.compile(
     r'(?:^|/)\.env(?:\.\w+)?$'
     r'|(?:^|/)\.dev\.vars(?:\.\w+)?$'
     r'|\.(?:pem|key|p12|pfx)$'
-    r'|(?:^|/)\.aws/(?:credentials|config)$'
+    r'|(?:^|/)\.aws/'
     r'|(?:^|/)\.ssh/id_'
     r'|(?:^|/)\.vault[-_]token$'
     r'|(?:^|/)\.npmrc$'

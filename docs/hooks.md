@@ -178,7 +178,10 @@ Additional Medium findings addressed:
 4. ~~**Shared sensitive path regex CI cross-check** (Medium)~~: Added `scripts/check-pattern-sync.py` that extracts and compares `_PREFIXED_TOKEN_PATTERNS` and `_RE_JWT` across all three files. Integrated into CI runner.
 5. ~~**Audit log data surface documentation** (Medium)~~: Added data surface and retention section to this file documenting fields, privacy notes, redaction behavior, and retention recommendations.
 
-Remaining: settings.local.json cleanup (Low).
+6. ~~**settings.local.json cleanup** (Low)~~: Removed overly broad allow patterns (`Bash(python3 *)`, `Bash(git *)`, `Bash(bash *)`, red team artifacts). Replaced with specific test runner and hook patterns.
+7. ~~**Landlock _SENSITIVE_PATH_RE divergence** (Medium, DefectDojo #2061)~~: Widened `.aws/` pattern in block-secrets.py to match landlock-sandbox.py; added `_SENSITIVE_PATH_RE` to CI pattern sync checker.
+
+All audit findings resolved.
 
 ## Known limitations
 
