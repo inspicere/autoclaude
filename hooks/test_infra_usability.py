@@ -53,13 +53,11 @@ bash('ansible-playbook playbooks/deploy.yml --limit webservers', label='ansible-
 bash('ansible all -m ping', label='ansible ping')
 bash('ansible all -m shell -a "uptime"', label='ansible shell uptime')
 bash('ansible-vault view secrets.yml --vault-password-file ~/.ansible-vault-password',
-     expect_blocked=True,
-     label='ansible-vault with vault-password-file (correctly blocked)')
+     label='ansible-vault view with vault-password-file')
 bash('ansible-playbook playbooks/deploy.yml --vault-password-file ~/.ansible-vault-password',
-     expect_blocked=True,
-     label='ansible-playbook with vault-password-file (correctly blocked)')
-# This is a detection gap (sensitive file accessed but not caught), not a false positive.
-# A separate issue could track adding ansible-vault awareness to the hook.
+     label='ansible-playbook with vault-password-file')
+bash('ansible-playbook playbooks/deploy.yml --vault-password-file ~/.ansible-vault-password 2>&1',
+     label='ansible-playbook with vault-password-file and redirect')
 bash('ansible-galaxy install geerlingguy.docker', label='ansible-galaxy install')
 bash('ansible-inventory --list', label='ansible-inventory --list')
 bash('ansible-lint playbooks/deploy.yml', label='ansible-lint')
