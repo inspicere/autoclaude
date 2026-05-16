@@ -2794,6 +2794,214 @@ def render_warns(all_records, since=None, out=None):
     print(file=out)
 
 
+# --- Phase 4: token-report renderers ---
+
+
+def _compute_token_findings(records, prose_records, top=None):
+    """Run all four detectors, rank, and return top-N findings.
+
+    Pure function — no I/O. `top=None` returns all findings.
+    """
+    findings = []
+    findings += find_repeated_reads(records)
+    findings += find_recipe_ngrams(records)
+    findings += find_repeated_prose(prose_records or [])
+    findings += find_resummarized_outputs(records)
+    rank_findings(findings)
+    if top is not None and top > 0:
+        findings = findings[:top]
+    return findings
+
+
+def _suggestion_headline(finding):
+    """One-line remediation hint shown in the report table."""
+    kind = finding.get("kind", "")
+    if kind == "repeated_read":
+        return ".claude/refs/ digest"
+    if kind == "repeated_webfetch":
+        return ".claude/refs/ snapshot (verify freshness)"
+    if kind == "recipe_ngram":
+        n = finding.get("_raw", {}).get("n", 0)
+        return "skill" if n >= 5 else "slash command"
+    if kind == "repeated_prose":
+        return "CLAUDE.md addition"
+    if kind == "resummarized_output":
+        return "wrapper script (scripts/)"
+    return ""
+
+
+def _suggestion_body(finding):
+    """Multi-line remediation suggestion shown in the DETAILS section."""
+    kind = finding.get("kind", "")
+    target = finding.get("target", "")
+    if kind == "repeated_read":
+        basename = os.path.basename(target.rstrip("/")) or "ref"
+        return (
+            f"Create .claude/refs/{basename}.md summarizing the key sections of\n"
+            f"  {target}\n"
+            f"Link from CLAUDE.md so it's loaded once per session instead of repeatedly read."
+        )
+    if kind == "repeated_webfetch":
+        return (
+            f"Cache a snapshot at .claude/refs/<host>-<slug>.md from\n"
+            f"  {target}\n"
+            f"Mark with retrieval date — external content, verify freshness periodically."
+        )
+    if kind == "recipe_ngram":
+        n = finding.get("_raw", {}).get("n", 0)
+        steps = finding.get("_raw", {}).get("steps", [])
+        artifact = "skill" if n >= 5 else "slash command"
+        path_hint = (
+            "~/.claude/skills/<name>/SKILL.md" if n >= 5
+            else ".claude/commands/<name>.md"
+        )
+        return (
+            f"Create a {artifact} at {path_hint} that performs:\n"
+            f"  {' → '.join(steps)}\n"
+            f"Invoke as /<name> instead of running these manually."
+        )
+    if kind == "repeated_prose":
+        exemplar = finding.get("_raw", {}).get("exemplar_full", target)
+        preview = exemplar[:200].replace("\n", " ")
+        return (
+            f"Add this recurring text to CLAUDE.md (or a project-specific note):\n"
+            f"  {preview}{'...' if len(exemplar) > 200 else ''}\n"
+            f"Loaded once per session instead of pasted into every prompt."
+        )
+    if kind == "resummarized_output":
+        ratio = finding.get("_raw", {}).get("narrow_ratio", 0)
+        avg_bytes = finding.get("_raw", {}).get("avg_input_bytes", 0)
+        return (
+            f"Add scripts/<name>.sh that pre-narrows the output of\n"
+            f"  {target}\n"
+            f"Avg input bytes: {avg_bytes}; only ~{int(ratio * 100)}% surfaces in output today."
+        )
+    return ""
+
+
+def _suggestion_type(finding):
+    """Machine-readable suggestion type for JSON output."""
+    kind = finding.get("kind", "")
+    if kind == "repeated_read":
+        return "reference_md"
+    if kind == "repeated_webfetch":
+        return "reference_md_external"
+    if kind == "recipe_ngram":
+        n = finding.get("_raw", {}).get("n", 0)
+        return "skill" if n >= 5 else "slash_command"
+    if kind == "repeated_prose":
+        return "claude_md_addition"
+    if kind == "resummarized_output":
+        return "wrapper_script"
+    return ""
+
+
+def render_token_report(records, prose_records, top=20, detail_top=5, out=None):
+    """Text report: ranked findings table + DETAILS section per top-N."""
+    if out is None:
+        out = sys.stdout
+
+    findings = _compute_token_findings(records, prose_records, top=top)
+
+    print("CLAUDE CODE TOKEN-CONSUMPTION REPORT", file=out)
+    print("=" * 70, file=out)
+    print(f"  Records scanned:    {len(records):>6}", file=out)
+    print(f"  Prose blocks:       {len(prose_records or []):>6}", file=out)
+    print(f"  Findings (top {top}):  {len(findings):>6}", file=out)
+    print(file=out)
+
+    if not findings:
+        print("  No findings above threshold.", file=out)
+        return
+
+    # Header
+    header = f"{'#':>3}  {'KIND':<22}{'OCC':>4} {'SESS':>4} {'AVG_TOK':>8} {'SCORE':>9} {'STAB':>5}  {'TARGET':<46} SUGGESTION"
+    print(header, file=out)
+    print("-" * len(header), file=out)
+    for i, f in enumerate(findings, 1):
+        target = f["target"]
+        if len(target) > 44:
+            target = target[:43] + "…"
+        line = (
+            f"{i:>3}  {f['kind']:<22}"
+            f"{f['occurrences']:>4} {f['distinct_sessions']:>4} "
+            f"{f['avg_tokens']:>8} {int(f['_score']):>9} "
+            f"{f['_stability_factor']:>5.2f}  "
+            f"{target:<46} {_suggestion_headline(f)}"
+        )
+        print(line, file=out)
+    print(file=out)
+
+    # Details section
+    detail_n = min(detail_top, len(findings))
+    if detail_n <= 0:
+        return
+    print("DETAILS (top {})".format(detail_n), file=out)
+    print("=" * 70, file=out)
+    for i, f in enumerate(findings[:detail_n], 1):
+        print(file=out)
+        print(f"[{i}] {f['kind']} — {f['target']}", file=out)
+        print(
+            f"    occurrences: {f['occurrences']} across {f['distinct_sessions']} sessions",
+            file=out,
+        )
+        print(
+            f"    avg_tokens: {f['avg_tokens']}, sum_tokens: {f['sum_tokens']}, "
+            f"score: {int(f['_score'])}, stability: {f['_stability_factor']:.2f}",
+            file=out,
+        )
+        sample = f.get("sample_session_ids", [])
+        if sample:
+            short = ", ".join(s[:8] for s in sample)
+            print(f"    sample sessions: {short}", file=out)
+        print(f"    suggestion ({_suggestion_type(f)}):", file=out)
+        for line in _suggestion_body(f).splitlines():
+            print(f"      {line}", file=out)
+
+
+def render_token_report_json(records, prose_records, top=20, filters=None, out=None):
+    """JSON report: structured findings for downstream tooling."""
+    if out is None:
+        out = sys.stdout
+
+    findings = _compute_token_findings(records, prose_records, top=top)
+
+    serialized = []
+    for i, f in enumerate(findings, 1):
+        serialized.append({
+            "rank": i,
+            "kind": f["kind"],
+            "target": f["target"],
+            "occurrences": f["occurrences"],
+            "distinct_sessions": f["distinct_sessions"],
+            "avg_tokens": f["avg_tokens"],
+            "sum_tokens": f["sum_tokens"],
+            "stability_factor": round(f["_stability_factor"], 3),
+            "score": round(f["_score"], 1),
+            "sample_session_ids": f.get("sample_session_ids", []),
+            "suggestion": {
+                "type": _suggestion_type(f),
+                "headline": _suggestion_headline(f),
+                "body": _suggestion_body(f),
+            },
+            "raw": f.get("_raw", {}),
+        })
+
+    payload = {
+        "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "filters": filters or {},
+        "summary": {
+            "records_scanned": len(records),
+            "prose_blocks": len(prose_records or []),
+            "total_findings": len(findings),
+            "top": top,
+        },
+        "findings": serialized,
+    }
+    json.dump(payload, out, indent=2)
+    print(file=out)
+
+
 def render_why(query, all_records):
     """Look up why a specific command gets prompted and how to fix it."""
     q = query.lower()
