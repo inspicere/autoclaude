@@ -2797,13 +2797,17 @@ def render_warns(all_records, since=None, out=None):
 # --- Phase 4: token-report renderers ---
 
 
-def _compute_token_findings(records, prose_records, top=None):
+def _compute_token_findings(records, prose_records, top=None,
+                             min_sessions=3, min_tokens=5000):
     """Run all four detectors, rank, and return top-N findings.
 
     Pure function — no I/O. `top=None` returns all findings.
+    `min_sessions` and `min_tokens` override Pattern A (repeated-reads)
+    thresholds; other detectors keep their built-in defaults.
     """
     findings = []
-    findings += find_repeated_reads(records)
+    findings += find_repeated_reads(records, min_sessions=min_sessions,
+                                    min_tokens=min_tokens)
     findings += find_recipe_ngrams(records)
     findings += find_repeated_prose(prose_records or [])
     findings += find_resummarized_outputs(records)
@@ -3092,6 +3096,7 @@ def main():
             "  %(prog)s --trend 7d              daily trend, last week\n"
             "  %(prog)s --why 'git push'        diagnose a specific command\n"
             "  %(prog)s --secrets --since 7d    secret exposure report\n"
+            "  %(prog)s --token-report          token-consumption optimization report\n"
             "  %(prog)s --apply --dry-run       preview allowlist changes\n"
             "  %(prog)s --generate-settings     deny rules + hook config\n"
             "\n"
@@ -3217,6 +3222,44 @@ def main():
              "exposure analysis: whether the secret was a literal (exposed), "
              "variable reference, runtime expansion, or pipe-safe.",
     )
+    parser.add_argument(
+        "--token-report",
+        action="store_true",
+        default=False,
+        help="Token-consumption optimization report. Detects repeated reads, "
+             "recurring tool-call recipes, repeated user prose, and large "
+             "re-summarized outputs. Suggests reference docs / slash commands / "
+             "skills / wrappers per finding. Read-only.",
+    )
+    parser.add_argument(
+        "--token-report-json",
+        action="store_true",
+        default=False,
+        help="Same as --token-report but emits structured JSON for downstream tooling.",
+    )
+    parser.add_argument(
+        "--token-top",
+        type=int,
+        default=20,
+        metavar="N",
+        help="With --token-report(-json): show only the top N findings (default 20).",
+    )
+    parser.add_argument(
+        "--token-min-sessions",
+        type=int,
+        default=3,
+        metavar="N",
+        help="With --token-report(-json): a repeated-read finding requires "
+             "at least N distinct sessions (default 3).",
+    )
+    parser.add_argument(
+        "--token-min-tokens",
+        type=int,
+        default=5000,
+        metavar="N",
+        help="With --token-report(-json): a repeated-read finding requires "
+             "at least N total tokens across all reads (default 5000).",
+    )
     args = parser.parse_args()
 
     trend_window = args.trend if args.trend is not None else None
@@ -3237,7 +3280,10 @@ def main():
     global_settings = load_global_settings()
     global_allow = global_settings.get("permissions", {}).get("allow", [])
 
+    collect_prose = args.token_report or args.token_report_json
+
     all_records = []
+    all_prose = []
 
     session_files = None
     if args.session:
@@ -3254,6 +3300,8 @@ def main():
             project_allow = load_project_settings(project_name)
             records = process_session(str(sf), global_allow + project_allow, project_name)
             all_records.extend(records)
+            if collect_prose:
+                all_prose.extend(extract_user_prose(str(sf), project_name))
     else:
         project_dirs = sorted(PROJECTS_DIR.iterdir()) if PROJECTS_DIR.exists() else []
         for project_dir in project_dirs:
@@ -3266,10 +3314,20 @@ def main():
             for jsonl_file in jsonl_files:
                 records = process_session(str(jsonl_file), combined_allow, project_name)
                 all_records.extend(records)
+                if collect_prose:
+                    all_prose.extend(extract_user_prose(str(jsonl_file), project_name))
 
     all_records = filter_records(all_records, since=since, project=args.project)
+    if collect_prose and args.project:
+        all_prose = [p for p in all_prose if p.get("project") == args.project
+                     or short_project_name(p.get("project", "")) == args.project]
 
-    if not all_records and not args.generate_settings and not args.warns and not args.secrets:
+    if (not all_records
+        and not args.generate_settings
+        and not args.warns
+        and not args.secrets
+        and not args.token_report
+        and not args.token_report_json):
         print("No tool call data found.", file=sys.stderr)
         sys.exit(1)
 
@@ -3307,6 +3365,48 @@ def main():
 
     if args.secrets:
         render_secrets(all_records)
+        return
+
+    if args.token_report or args.token_report_json:
+        as_json = args.token_report_json
+        active_filter_dict = {}
+        if args.since:
+            active_filter_dict["since"] = args.since
+        if args.project:
+            active_filter_dict["project"] = args.project
+        if args.session:
+            active_filter_dict["session"] = args.session
+
+        def _render(out=None):
+            if as_json:
+                render_token_report_json(
+                    all_records, all_prose,
+                    top=args.token_top,
+                    filters=active_filter_dict,
+                    out=out,
+                )
+            else:
+                render_token_report(
+                    all_records, all_prose,
+                    top=args.token_top,
+                    out=out,
+                )
+
+        if args.output is None:
+            _render()
+        else:
+            ext = ".json" if as_json else ".txt"
+            if args.output == "auto":
+                out_path = f"claude-token-report-{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H%M%SZ')}{ext}"
+            elif os.path.isdir(args.output):
+                out_path = os.path.join(
+                    args.output,
+                    f"claude-token-report-{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H%M%SZ')}{ext}",
+                )
+            else:
+                out_path = args.output
+            _atomic_write(out_path, lambda f: _render(out=f))
+            print(f"Token report written to {out_path}", file=sys.stderr)
         return
 
     if args.apply is not None:

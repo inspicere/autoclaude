@@ -110,6 +110,36 @@ python3 claude-approval-report.py --generate-settings | jq '.permissions.deny'
 
 Outputs JSON with deny rules and hook config ready to merge into `~/.claude/settings.json`. Commentary on stderr shows what's already configured vs. what's new.
 
+### Token report
+
+```bash
+python3 claude-approval-report.py --token-report
+python3 claude-approval-report.py --token-report --since 30d --project laima
+python3 claude-approval-report.py --token-report --token-top 10
+python3 claude-approval-report.py --token-report --token-min-sessions 5
+python3 claude-approval-report.py --token-report-json | jq '.findings[0]'
+python3 claude-approval-report.py --token-report --output /tmp/        # auto-named .txt
+python3 claude-approval-report.py --token-report-json --output         # auto-named .json
+```
+
+Surfaces opportunities to reduce per-session token consumption by detecting commonly repeated work and suggesting reference docs, slash commands, skills, or wrapper scripts. Read-only — no files are written by this mode.
+
+Four detectors run; findings are ranked by `occurrences * avg_tokens * stability_factor` (stability ∈ [0.1, 1.0], 1.0 = stable, 0.1 = >30 commits in 180 days):
+
+| Detector | Triggers when | Suggestion |
+|---|---|---|
+| `repeated_read` | Same `Read` target hit in ≥3 sessions with ≥5K total tokens | `.claude/refs/<name>.md` digest, link from CLAUDE.md |
+| `repeated_webfetch` | Same URL fetched in ≥3 sessions with ≥5K tokens | Cached `.claude/refs/<host>-<slug>.md` snapshot |
+| `recipe_ngram` | Same tool-call sequence (n ∈ {3,4,5}) ≥5 times across ≥2 sessions, idle-gap segmented at 10 min | Slash command (n≤4) or skill (n≥5) |
+| `repeated_prose` | User pastes the same paragraph (≥400 chars) ≥3 times across sessions | `CLAUDE.md` addition |
+| `resummarized_output` | Tool output ≥8KB followed by an assistant turn whose `output_tokens < 0.25 * result_tokens_est` | Wrapper script under `scripts/` that pre-narrows the output |
+
+**Token attribution.** The `usage` block lives on the assistant message, not per `tool_use`. The analyzer attributes next-turn `cache_creation_input_tokens` proportionally to the prior turn's tool_use blocks weighted by `result_bytes`, then caps each estimate at `result_bytes/3` (an upper bound on chars-per-token). Records expose `_token_estimate_method` as one of `usage_delta`, `usage_delta_capped`, or `char_div_4` (fallback when no delta is available).
+
+**Thresholds.** `--token-min-sessions` and `--token-min-tokens` adjust the Pattern A (repeated-read) cutoffs only; other detectors keep built-in defaults. `--token-top` controls how many findings appear in the table (default 20); the DETAILS section always covers the top 5.
+
+**JSON shape.** `--token-report-json` emits `{generated_at, filters, summary, findings: [...]}` where each finding carries `{rank, kind, target, occurrences, distinct_sessions, avg_tokens, sum_tokens, stability_factor, score, sample_session_ids, suggestion: {type, headline, body}, raw}`.
+
 ### JSON output
 
 ```bash

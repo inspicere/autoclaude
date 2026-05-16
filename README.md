@@ -88,10 +88,11 @@ Requires Linux 5.13+ with Landlock enabled (kernel 6.1+ recommended for ABI v4+)
 | `--trend [window]` | Time-series table of approval rates, risk, and secrets per day/week/month |
 | `--secrets` | Every detected secret exposure with risk classification (exposed/runtime/variable/pipe-safe/false-pos) |
 | `--warns` | Hook warning events cross-referenced with user approval decisions |
+| `--token-report` | Token-consumption optimization: detects repeated reads, recurring tool-call recipes, repeated user prose, and re-summarized large outputs. Suggests reference docs, slash commands, skills, or wrapper scripts. |
 | `--why "cmd"` | Diagnose why a specific command gets prompted |
 | `--apply` | Write suggested allowlist patterns to settings files |
 | `--generate-settings` | Emit deny rules + hook config as mergeable JSON |
-| `--json` | Machine-readable output for all modes |
+| `--json` | Machine-readable output for the approval report (use `--token-report-json` for the token mode) |
 
 All modes accept `--since` (e.g. `7d`, `2w`, `2026-05-01`), `--project`, and `--session` filters.
 
