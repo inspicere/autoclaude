@@ -1035,6 +1035,149 @@ report._git_commit_count.cache_clear()
 
 
 # =============================================================================
+# Phase 4: suggestion dispatch
+# =============================================================================
+print("\n=== _suggestion_headline / _suggestion_type / _suggestion_body ===")
+
+def _f(kind, target="t", n=3):
+    return {"kind": kind, "target": target, "_raw": {"n": n, "steps": ["A", "B"], "exemplar_full": "x", "narrow_ratio": 0.1, "avg_input_bytes": 10000}}
+
+check(report._suggestion_type(_f("repeated_read")) == "reference_md", "type: reference_md")
+check(report._suggestion_type(_f("repeated_webfetch")) == "reference_md_external", "type: reference_md_external")
+check(report._suggestion_type(_f("recipe_ngram", n=3)) == "slash_command", "type: slash_command for n=3")
+check(report._suggestion_type(_f("recipe_ngram", n=5)) == "skill", "type: skill for n>=5")
+check(report._suggestion_type(_f("repeated_prose")) == "claude_md_addition", "type: claude_md_addition")
+check(report._suggestion_type(_f("resummarized_output")) == "wrapper_script", "type: wrapper_script")
+check(report._suggestion_type(_f("unknown")) == "", "type: unknown -> empty")
+
+check("slash command" in report._suggestion_headline(_f("recipe_ngram", n=3)), "headline: slash command for n=3")
+check("skill" in report._suggestion_headline(_f("recipe_ngram", n=5)), "headline: skill for n=5")
+check(".claude/refs/" in report._suggestion_headline(_f("repeated_read")), "headline: refs for read")
+
+check(".claude/refs/" in report._suggestion_body(_f("repeated_read", target="~/x.py")), "body: read mentions refs/")
+check("CLAUDE.md" in report._suggestion_body(_f("repeated_prose")), "body: prose mentions CLAUDE.md")
+check("scripts/" in report._suggestion_body(_f("resummarized_output", target="~/x")), "body: resummarized mentions scripts/")
+check("snapshot" in report._suggestion_body(_f("repeated_webfetch", target="https://x")), "body: webfetch mentions snapshot")
+body = report._suggestion_body(_f("recipe_ngram", n=5))
+check("skills/" in body, "body: 5+ step recipe -> skill path")
+
+
+# =============================================================================
+# Phase 4: _compute_token_findings
+# =============================================================================
+print("\n=== _compute_token_findings ===")
+
+# Build records that trigger Pattern A
+recs = [{"tool_name": "Read", "session": f"s{i}", "_input_target": "~/x.py",
+         "_result_tokens_est": 5000, "timestamp": "2026-05-15T00:00:00Z"} for i in range(3)]
+out = report._compute_token_findings(recs, [])
+check(len(out) >= 1, "produces at least one finding")
+check(all("_score" in f and "_stability_factor" in f for f in out), "findings are ranked (have _score + _stability_factor)")
+
+# top=N truncates
+recs_many = []
+for j in range(10):
+    for i in range(3):
+        recs_many.append({"tool_name": "Read", "session": f"s{j}_{i}",
+                          "_input_target": f"~/file{j}.py", "_result_tokens_est": 5000,
+                          "timestamp": "2026-05-15T00:00:00Z"})
+out = report._compute_token_findings(recs_many, [], top=5)
+check(len(out) == 5, f"top=5 truncates (got {len(out)})")
+
+# top=None returns all
+out = report._compute_token_findings(recs_many, [], top=None)
+check(len(out) >= 5, "top=None returns all findings")
+
+# Empty input is graceful
+check(report._compute_token_findings([], []) == [], "empty input -> []")
+check(report._compute_token_findings([], None) == [], "None prose -> []")
+
+
+# =============================================================================
+# Phase 4: render_token_report (text)
+# =============================================================================
+print("\n=== render_token_report (text) ===")
+
+# Empty report
+buf = io.StringIO()
+report.render_token_report([], [], top=10, out=buf)
+out_text = buf.getvalue()
+check("CLAUDE CODE TOKEN-CONSUMPTION REPORT" in out_text, "header rendered")
+check("No findings above threshold" in out_text, "empty -> no-findings line")
+
+# With findings
+recs = []
+for j in range(4):
+    for i in range(3):
+        recs.append({"tool_name": "Read", "session": f"s{j}_{i}",
+                     "_input_target": f"~/file{j}.py", "_result_tokens_est": 3000,
+                     "timestamp": "2026-05-15T00:00:00Z"})
+buf = io.StringIO()
+report.render_token_report(recs, [], top=10, detail_top=2, out=buf)
+out_text = buf.getvalue()
+check("Records scanned:" in out_text, "scanned line present")
+check("repeated_read" in out_text, "kind appears in table")
+check("DETAILS (top 2)" in out_text, "DETAILS section labelled with detail_top")
+check(out_text.count("[1]") >= 1 and out_text.count("[2]") >= 1, "detail entries [1] and [2]")
+# Header columns present
+for col in ("KIND", "OCC", "SESS", "AVG_TOK", "SCORE", "STAB", "TARGET", "SUGGESTION"):
+    check(col in out_text, f"header has {col}")
+
+# Long target truncated with ellipsis
+recs_long = [{"tool_name": "Read", "session": f"s{i}",
+              "_input_target": "/very/long/path/" + "x" * 100,
+              "_result_tokens_est": 3000, "timestamp": "2026-05-15T00:00:00Z"} for i in range(3)]
+buf = io.StringIO()
+report.render_token_report(recs_long, [], out=buf)
+check("…" in buf.getvalue(), "long target truncated with ellipsis")
+
+
+# =============================================================================
+# Phase 4: render_token_report_json
+# =============================================================================
+print("\n=== render_token_report_json ===")
+import json as _json
+
+# Empty
+buf = io.StringIO()
+report.render_token_report_json([], [], out=buf)
+payload = _json.loads(buf.getvalue())
+check("generated_at" in payload, "JSON has generated_at")
+check("filters" in payload and "summary" in payload and "findings" in payload, "JSON has top-level keys")
+check(payload["findings"] == [], "empty findings list")
+
+# With findings
+buf = io.StringIO()
+report.render_token_report_json(recs, [], top=5, filters={"project": "p"}, out=buf)
+payload = _json.loads(buf.getvalue())
+check(payload["filters"] == {"project": "p"}, "filters echoed")
+check(payload["summary"]["records_scanned"] == len(recs), "records_scanned in summary")
+check(payload["summary"]["top"] == 5, "top in summary")
+check(len(payload["findings"]) >= 1, "findings present")
+
+f0 = payload["findings"][0]
+for key in ("rank", "kind", "target", "occurrences", "distinct_sessions",
+            "avg_tokens", "sum_tokens", "stability_factor", "score",
+            "sample_session_ids", "suggestion", "raw"):
+    check(key in f0, f"finding has {key}")
+check(f0["rank"] == 1, "first finding rank=1")
+check(isinstance(f0["suggestion"], dict), "suggestion is dict")
+for key in ("type", "headline", "body"):
+    check(key in f0["suggestion"], f"suggestion has {key}")
+check(isinstance(f0["stability_factor"], float), "stability_factor is float")
+check(isinstance(f0["score"], (int, float)), "score is numeric")
+
+# Findings are sorted by rank (ascending) which corresponds to score (descending)
+buf = io.StringIO()
+report.render_token_report_json(recs, [], top=20, out=buf)
+payload = _json.loads(buf.getvalue())
+ranks = [f["rank"] for f in payload["findings"]]
+check(ranks == sorted(ranks), "ranks ascending")
+scores = [f["score"] for f in payload["findings"]]
+check(scores == sorted(scores, reverse=True), "scores descending")
+
+
+# =============================================================================
 # SUMMARY
 # =============================================================================
 print("\n" + "=" * 70)
