@@ -105,6 +105,45 @@ Two Forgejo Actions workflows run on push to `main` and on PRs:
 
 Both use `node:22-slim` image on the `docker` runner label. Product: `autoclaude`, Product Type: `Inspicere Projects`. The `DEFECTDOJO_API_TOKEN` secret is configured on the Forgejo repo. Scanner versions are pinned with SHA256 verification.
 
+## Known Issues (from 2026-05-16 project audit) — AUDIT ONLY, NO CODE CHANGES
+
+A read-only 12-dimension `/project-audit` run on 2026-05-16 over the application + claude-code domain overlays. 1,006 tests confirmed passing. **0 Critical, 2 High, 11 Medium, 13 Low, 7 Info.** Overall risk posture: Moderate. No code changes. Findings tracked in DefectDojo engagement 123 (see Tracking section below).
+
+### High (2) — OPEN
+
+H1. **`docker run --mount type=bind,source=...` not detected** — `hooks/block-secrets.py:990-997`. Hook only checks `-v`/`--volume`; the `--mount source=...` syntax bypasses detection. Fix: parse comma-delimited `--mount` values and run `source=` through `_is_sensitive_path`. Add regression test paralleling `hooks/test_block_secrets.py:84`.
+
+H2. **`tar`/`zip` skip all `-`-prefixed args, missing `--file=` and bunched flags** — `hooks/block-secrets.py:983-988`. `tar -cT/path/...` and `tar --file=...` escape detection. Fix: extend `_FILE_FLAG_ARGS` with `tar`/`zip` entries for `-T`/`--files-from`/`--file=`, or treat `--*=PATH` long-flag values as candidate paths.
+
+### Medium (11) — OPEN
+
+- `_RE_SECRET_ASSIGN` value capture `(\S+)` stops at first whitespace (quoted values partially redacted)
+- Env-var truthy parsing is exact-match-to-"1" only (`HOOK_AUDIT=true` silently disables auditing)
+- Audit log `summary`/`reason` fields not redacted (only `command` is)
+- Log-rotation race between parallel hook invocations
+- All session JSONL files held in memory across entire run (no aggregate cap)
+- `render_warns` is O(W × R) substring search for warn-vs-session correlation
+- Audit log has no automatic retention (auto-rotates to `.jsonl.1` but never deletes)
+- No schema validation on `settings.json`/`settings.local.json` loads
+- CI base image `node:22-slim` pulled by tag, not digest
+- No `pyproject.toml` / `setup.py` (no `python_requires`, no entry-point)
+- Coverage measurement absent in CI; no property-based/fuzz tests (tracked existing Vikunja #449)
+- Only first `secret_warning` surfaces; others dropped
+
+### Low (13) — backlog
+
+Permissive `_RE_PRIVATE_KEY` header; symlink TOCTOU; `HOOK_AUDIT` default-on privacy surface not in README; silent `JSONDecodeError` drops; unbounded `_unwrap_grouping` recursion; `_apply_suggestions` not concurrent-safe; `_git_commit_count` not cached across runs; `HOME_SLUG` username in JSON; CI test stdout includes synthetic sensitive-path strings; `_MAX_SESSION_SIZE` hardcoded; no `CHANGELOG.md`; `CLAUDE.md` is ~700 lines (token waste); misc hygiene (`docs/token-report-plan.md` unlinked, no `--version`/`--quiet`, `actions/checkout@v4` tag-pinned, semgrep no hash verification, append-not-dedupe in apply, hard-coded POSIX paths).
+
+### Info (7) — observations / strengths
+
+Three deliberate copies of token patterns (sync-checked by CI); Read/Write/Edit deny rules vs Bash hook protection symmetry; `.gitleaks.toml` test-file allowlist; no metrics/telemetry; no third-party Python deps; correct `_atomic_write` and POSIX-atomic `O_APPEND` audit log; CLI ergonomics strong; fail-closed default correct (no hook schema-version detection).
+
+### Tracking
+
+- **DefectDojo:** engagement 123 "Project Audit 2026-05-16" under product `autoclaude` (ID 21), test 114. 14 findings: H1=3262, H2=3263, M1-M11=3264-3274, Low-rollup=3275.
+- **Vikunja:** P1 #527 (H1), #528 (H2); P3 #529-#539 covering Mediums (M11 deferred to existing #449 for CI coverage); P5 #540, #541 (trim CLAUDE.md, add CHANGELOG + `--version`). Project **#2 Laima**.
+- **SilverBullet:** summary in `daily/2026-05-16.md`; backlog in `1-Projects/Autoclaude/Project Overview.md`.
+
 ## Known Issues (from 2026-05-10 round 3 red team engagement) — ALL 10 CONFIRMED BYPASSES FIXED
 
 A third multi-agent red team engagement on 2026-05-10 targeted the hooks with the same planted fake secret in `~/autoclaude_engagement_target/.env`. 8 parallel agents (4 Opus, 4 Sonnet) found 10 confirmed live bypasses (all extracted full file contents with zero PostToolUse warnings) plus 25 analysis-only findings. All 10 confirmed bypasses were remediated same-day. Hook grew from ~1183 to ~1324 lines, then to ~1450 lines with analysis-only fixes. 802 tests across 12 suites.
