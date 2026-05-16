@@ -26,8 +26,9 @@ import os
 import re
 import time
 
-_DEBUG = os.environ.get("HOOK_DEBUG", "") == "1"
-_AUDIT = os.environ.get("HOOK_AUDIT", "1") == "1"
+_TRUTHY = frozenset({"1", "true", "yes", "on"})
+_DEBUG = os.environ.get("HOOK_DEBUG", "").lower() in _TRUTHY
+_AUDIT = os.environ.get("HOOK_AUDIT", "1").lower() in _TRUTHY
 _AUDIT_LOG = os.path.join(os.path.expanduser("~"), ".claude", "hook-audit.jsonl")
 
 
@@ -36,15 +37,23 @@ def _debug(msg):
         print(f"[hook-debug] {msg}", file=sys.stderr)
 
 
+def _redact(text):
+    """Redact known token patterns, JWTs, and secret assignments from text."""
+    if not text:
+        return text
+    text = _PREFIXED_TOKEN_PATTERNS.sub('<REDACTED>', text)
+    text = _RE_JWT.sub('<REDACTED-JWT>', text)
+    text = _RE_SECRET_ASSIGN.sub(lambda m: f'{m.group(1)}=<REDACTED>', text)
+    return text
+
+
 def _audit_log(decision, tool_name, summary="", reason="", command="",
                confidence=""):
     """Append a structured JSON record to the audit log."""
     if not _AUDIT:
         return
     if command:
-        command = _PREFIXED_TOKEN_PATTERNS.sub('<REDACTED>', command)
-        command = _RE_JWT.sub('<REDACTED-JWT>', command)
-        command = _RE_SECRET_ASSIGN.sub(lambda m: f'{m.group(1)}=<REDACTED>', command)
+        command = _redact(command)
         command = command[:500 if decision != "block" else 200]
     record = {
         "ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
@@ -52,9 +61,9 @@ def _audit_log(decision, tool_name, summary="", reason="", command="",
         "tool": tool_name,
     }
     if summary:
-        record["summary"] = summary[:200]
+        record["summary"] = _redact(summary)[:200]
     if reason:
-        record["reason"] = reason[:300]
+        record["reason"] = _redact(reason)[:300]
     if command:
         record["command"] = command[:500]
     if confidence:
@@ -120,7 +129,7 @@ _RE_CURL_AUTH = re.compile(
 
 _RE_SECRET_ASSIGN = re.compile(
     r'\b(\w{0,50}(?:API_KEY|SECRET|TOKEN|PASSWORD|PRIVATE_KEY|CREDENTIAL|_AUTH|AUTH_)\w*)'
-    r'=\s*(\S+)',
+    r'=\s*((?:"[^"]*"|\'[^\']*\'|\S+))',
     re.IGNORECASE,
 )
 
@@ -1406,7 +1415,10 @@ def main():
 
         if secret_warnings:
             confidence = _classify_leak_confidence(command)
-            warn(secret_warnings[0], confidence)
+            reason = secret_warnings[0]
+            if len(secret_warnings) > 1:
+                reason += f" (+{len(secret_warnings) - 1} more)"
+            warn(reason, confidence)
 
     elif tool_name in ("Read", "Edit", "Write"):
         file_path = tool_input.get("file_path", "")

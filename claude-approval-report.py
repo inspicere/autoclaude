@@ -32,7 +32,7 @@ _RE_SHELL_OPS = re.compile(r'^[&|;]+\s*')
 
 _RE_SECRET_ASSIGN = re.compile(
     r'\b(\w{0,50}(?:API_KEY|SECRET|TOKEN|PASSWORD|PRIVATE_KEY|CREDENTIAL|_AUTH|AUTH_)\w*)'
-    r'=\s*(\S+)',
+    r'=\s*((?:"[^"]*"|\'[^\']*\'|\S+))',
     re.IGNORECASE,
 )
 
