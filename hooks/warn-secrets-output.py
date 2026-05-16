@@ -143,7 +143,8 @@ def _scan_output(text):
 
 
 _AUDIT_LOG = os.path.join(os.path.expanduser("~"), ".claude", "hook-audit.jsonl")
-_CORRELATE = os.environ.get("HOOK_CORRELATE", "1") == "1"
+_TRUTHY = frozenset({"1", "true", "yes", "on"})
+_CORRELATE = os.environ.get("HOOK_CORRELATE", "1").lower() in _TRUTHY
 _RE_VAR_FROM_REASON = re.compile(r'^(\w+) will (?:be set|expand)')
 
 

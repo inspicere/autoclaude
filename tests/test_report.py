@@ -96,6 +96,24 @@ check(not report._cmd_has_secrets("export API_KEY=$VAULT_TOKEN"), "variable refe
 
 
 # =============================================================================
+# M1 (2026-05-16 audit): _RE_SECRET_ASSIGN captures quoted values with spaces
+# =============================================================================
+print("\n=== _RE_SECRET_ASSIGN quoted-value capture (M1) ===")
+m = report._RE_SECRET_ASSIGN.search('API_KEY="value with spaces here"')
+check(m is not None and m.group(2) == '"value with spaces here"',
+      f"double-quoted value with spaces captured fully (got {m.group(2) if m else None!r})")
+m = report._RE_SECRET_ASSIGN.search("VAULT_TOKEN='multi word secret'")
+check(m is not None and m.group(2) == "'multi word secret'",
+      f"single-quoted value with spaces captured fully (got {m.group(2) if m else None!r})")
+m = report._RE_SECRET_ASSIGN.search("API_KEY=plainvalue")
+check(m is not None and m.group(2) == "plainvalue",
+      f"unquoted value still captured (got {m.group(2) if m else None!r})")
+red = report.redact_secrets('export API_KEY="long secret with spaces"')
+check("<REDACTED>" in red and "long secret" not in red,
+      f"redaction covers full quoted span (got {red!r})")
+
+
+# =============================================================================
 # Risk classification
 # =============================================================================
 print("\n=== Risk classification ===")
