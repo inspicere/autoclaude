@@ -25,10 +25,12 @@ python3 claude-approval-report.py --trend --bucket quarter   # quarterly, all ti
 python3 claude-approval-report.py --session current --summary  # latest session only
 python3 claude-approval-report.py --warns              # hook warning events + user decisions
 python3 claude-approval-report.py --warns --since 7d   # warns from the last week
+python3 claude-approval-report.py --token-report       # token-consumption optimization report
+python3 claude-approval-report.py --token-report-json --token-top 10  # JSON, top 10
 python3 claude-approval-report.py -o           # write to auto-named timestamped file
 ```
 
-No dependencies beyond Python 3.11+ stdlib. Test suites: `tests/test_report.py` (155 tests for the main script's pure functions), `hooks/test_block_secrets.py` (67 tests), `hooks/test_bypass_fixes.py` (110 tests), `hooks/test_round2_bypass_fixes.py` (50 tests), `hooks/test_round3_bypass_fixes.py` (82 tests), `hooks/test_analysis_fixes.py` (68 tests), `hooks/test_fp_fixes.py` (28 tests), `hooks/test_infra_usability.py` (139 tests), `hooks/test_warn_secrets.py` (15 tests), `hooks/test_warn_mode.py` (30 tests), `hooks/test_warn_output_adversarial.py` (48 tests), `scripts/check-pattern-sync.py` (10 checks) — 802 total.
+No dependencies beyond Python 3.11+ stdlib. Test suites: `tests/test_report.py` (359 tests for the main script's pure functions), `hooks/test_block_secrets.py` (67 tests), `hooks/test_bypass_fixes.py` (110 tests), `hooks/test_round2_bypass_fixes.py` (50 tests), `hooks/test_round3_bypass_fixes.py` (82 tests), `hooks/test_analysis_fixes.py` (68 tests), `hooks/test_fp_fixes.py` (28 tests), `hooks/test_infra_usability.py` (139 tests), `hooks/test_warn_secrets.py` (15 tests), `hooks/test_warn_mode.py` (30 tests), `hooks/test_warn_output_adversarial.py` (48 tests), `scripts/check-pattern-sync.py` (10 checks) — 1006 total.
 
 ## Architecture
 
@@ -38,9 +40,21 @@ Everything lives in `claude-approval-report.py`. The processing pipeline:
 2. **Session parsing** (`process_session`) — reads JSONL files (using `**/*.jsonl` recursive glob to include subagent transcripts), correlates assistant tool_use blocks with user result records via `sourceToolAssistantUUID`/`toolUseID`, determines approval/rejection status
 3. **Risk classification** (`classify_risk`) — categorizes each tool call as destructive/mutating/read-only. Bash commands get sub-command-aware logic for git, curl, find, sed, ansible-playbook. Secret detection runs 22 provider-specific token regexes plus Shannon entropy on base64 blobs (primary >= 3.5 threshold plus secondary unique-char-ratio check for 3.0-3.5 range to catch padding evasion)
 4. **Command normalization** (`normalize_command`) — groups variants (e.g., all `git add` invocations, all `ssh` to the same host) for aggregation
-5. **Rendering** — seven output modes: full tables (`render_report`), compact dashboard (`render_summary`), JSON (`render_json`), single-command lookup (`render_why`), security settings generation (`render_generate_settings`), time-series trend (`render_trend`), hook warning audit (`render_warns`)
-6. **Apply** (`apply_suggestions`) — writes suggested patterns to project `settings.local.json` files
-7. **Generate settings** (`render_generate_settings`) — emits deny rules + hook config as a mergeable JSON fragment, with data-driven analysis of actual secret exposures via `_find_secret_exposures`
+5. **Token accounting** (`attribute_tool_result_tokens`, `annotate_next_turn_output`, `extract_user_prose`) — captures per-turn `usage` from assistant messages and attributes next-turn `cache_creation_input_tokens` proportionally to prior-turn tool_use blocks weighted by `result_bytes`, capped at `result_bytes/3`. Records get `_input_target`, `_result_bytes`, `_result_tokens_est`, `_token_estimate_method`, `_turn_uuid`, `_turn_index`, `_next_turn_output_tokens`. Used by the token-report detectors.
+6. **Rendering** — nine output modes: full tables (`render_report`), compact dashboard (`render_summary`), JSON (`render_json`), single-command lookup (`render_why`), security settings generation (`render_generate_settings`), time-series trend (`render_trend`), hook warning audit (`render_warns`), token-consumption report (`render_token_report` / `render_token_report_json`)
+7. **Apply** (`apply_suggestions`) — writes suggested patterns to project `settings.local.json` files
+8. **Generate settings** (`render_generate_settings`) — emits deny rules + hook config as a mergeable JSON fragment, with data-driven analysis of actual secret exposures via `_find_secret_exposures`
+
+## Token-consumption report (`--token-report`, `--token-report-json`)
+
+Four detectors run over the parsed records + user prose, then are ranked by `occurrences * avg_tokens * stability_factor`:
+
+- `find_repeated_reads` — Pattern A (Read/WebFetch targets across sessions)
+- `find_recipe_ngrams` — Pattern B (recurring tool-call sequences, n ∈ {3,4,5}, idle-gap segmented at 10 min)
+- `find_repeated_prose` — Pattern C (repeated paragraphs the user pastes into prompts)
+- `find_resummarized_outputs` — Pattern D (≥8KB tool outputs followed by tiny next-turn output)
+
+`compute_stability_factor(target, kind)` returns a value in `[0.1, 1.0]` — local files via `git log --follow --since="180 days ago"` (with 2s timeout + `lru_cache`), URLs always 0.7, recipes and prose always 1.0. Volatile files (>30 commits in window) are discounted 10×, so reference docs aren't recommended for moving targets. Per-finding suggestions: `reference_md` / `reference_md_external` / `slash_command` / `skill` / `claude_md_addition` / `wrapper_script`. Mode is read-only — no files are written. See `docs/cli-reference.md` for flag details and JSON schema.
 
 Key design choices:
 - `HOME_SLUG` is dynamically computed from `Path.home()` (e.g., `-home-terrabot` on this system) and maps between Claude's project directory names and actual filesystem paths. `project_settings_path` handles slug-to-path resolution including dot-to-dash normalization.
