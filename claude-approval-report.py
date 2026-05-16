@@ -6,13 +6,17 @@ if sys.version_info < (3, 11):
     sys.exit("Error: Python 3.11+ required. Found " + ".".join(map(str, sys.version_info[:3])))
 
 import argparse
+import hashlib
 import json
 import math
 import os
 import re
+import subprocess
 import tempfile
+import time
 from collections import defaultdict, Counter
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 from pathlib import Path
 from fnmatch import fnmatch
 
@@ -572,6 +576,239 @@ def get_tool_full_command(tool_name, tool_input):
 _MAX_SESSION_SIZE = 100 * 1024 * 1024  # 100 MB
 
 
+# --- Token-attribution helpers (Phase 1 of token-report mode) ---
+#
+# Strategy: per-turn `usage` lives on the assistant message, not per tool_use.
+# We attribute the next-turn `cache_creation_input_tokens` delta proportionally
+# across the prior turn's tool_use blocks, weighted by `result_bytes`.
+# Fallback: `len(text) / 4`. The estimate method is recorded so the UI can
+# surface a confidence flag.
+
+_RE_PROSE_BOILERPLATE = re.compile(
+    r'<(?:system-reminder|command-name|command-message|command-args|local-command-stdout)>'
+    r'.*?</(?:system-reminder|command-name|command-message|command-args|local-command-stdout)>',
+    re.DOTALL,
+)
+
+
+def _normalize_read_target(file_path):
+    """Normalize a Read tool file_path: home -> ~, no line range hints."""
+    if not file_path:
+        return ""
+    return shorten_path(str(file_path))
+
+
+def _normalize_url(url):
+    """Normalize a WebFetch URL: lowercase scheme/host, strip query+fragment."""
+    if not url:
+        return ""
+    url = str(url).strip()
+    # Strip fragment, then query
+    for sep in ("#", "?"):
+        i = url.find(sep)
+        if i >= 0:
+            url = url[:i]
+    # Lowercase scheme://host portion
+    m = re.match(r'^([a-zA-Z][a-zA-Z0-9+.\-]*://)([^/]+)(.*)$', url)
+    if m:
+        return m.group(1).lower() + m.group(2).lower() + m.group(3)
+    return url
+
+
+def _extract_input_target(tool_name, tool_input):
+    """Return a canonical target string for grouping (Pattern A + recipes).
+
+    Returns "" when the tool has no obvious target (e.g. WebSearch query).
+    """
+    if not isinstance(tool_input, dict):
+        return ""
+    if tool_name == "Read":
+        return _normalize_read_target(tool_input.get("file_path", ""))
+    if tool_name in ("Write", "Edit"):
+        return _normalize_read_target(tool_input.get("file_path", ""))
+    if tool_name == "WebFetch":
+        return _normalize_url(tool_input.get("url", ""))
+    if tool_name == "Bash":
+        return normalize_command(tool_input.get("command", ""))
+    return ""
+
+
+def _compute_result_bytes(tool_use_result, msg_content):
+    """Best-effort byte count for a tool result.
+
+    Prefers structured `toolUseResult` (has stdout/stderr split for Bash).
+    Falls back to message.content text length.
+    """
+    total = 0
+    if isinstance(tool_use_result, dict):
+        for key in ("stdout", "stderr", "content"):
+            v = tool_use_result.get(key)
+            if isinstance(v, str):
+                total += len(v)
+        if total:
+            return total
+        # Read-tool style: file content under .file.text or similar
+        for v in tool_use_result.values():
+            if isinstance(v, str):
+                total += len(v)
+            elif isinstance(v, dict):
+                for vv in v.values():
+                    if isinstance(vv, str):
+                        total += len(vv)
+        if total:
+            return total
+    elif isinstance(tool_use_result, str):
+        total = len(tool_use_result)
+        if total:
+            return total
+    if isinstance(msg_content, list):
+        for c in msg_content:
+            if isinstance(c, dict) and c.get("type") == "tool_result":
+                content = c.get("content", "")
+                if isinstance(content, str):
+                    total += len(content)
+                elif isinstance(content, list):
+                    for x in content:
+                        if isinstance(x, dict):
+                            t = x.get("text", "")
+                            if isinstance(t, str):
+                                total += len(t)
+    elif isinstance(msg_content, str):
+        total += len(msg_content)
+    return total
+
+
+def _estimate_tokens_from_bytes(byte_count):
+    """Cheap fallback: roughly 4 chars per token."""
+    return max(0, byte_count // 4)
+
+
+# Upper bound on tokens per byte. Real ratio is usually ~3-4 chars/token; we
+# use 1/3 as a safe ceiling to cap inflated `cache_creation` attributions.
+_BYTE_TOKEN_CAP_DIVISOR = 3
+
+
+def attribute_tool_result_tokens(records, turn_usage_by_uuid, turn_order):
+    """Attribute next-turn cache_creation tokens proportionally to a turn's tool results.
+
+    Mutates records in-place, adding:
+      - _result_tokens_est: int
+      - _token_estimate_method: "usage_delta" | "usage_delta_capped" | "char_div_4"
+
+    The proportional share is capped at `result_bytes // 3` because
+    `cache_creation_input_tokens` includes everything new in the next turn
+    (prose, system reminders, the assistant's output prefix, ...), not just
+    the prior turn's tool output. Without the cap, single-tool turns
+    over-attribute when the user adds a large prose block.
+
+    Args:
+      records: list of record dicts with `_turn_uuid` and `_result_bytes` set
+      turn_usage_by_uuid: {uuid: usage_dict} from assistant messages
+      turn_order: ordered list of uuids (chronological)
+    """
+    by_turn = defaultdict(list)
+    for r in records:
+        uuid = r.get("_turn_uuid")
+        if uuid:
+            by_turn[uuid].append(r)
+
+    for i, uuid in enumerate(turn_order):
+        turn_records = by_turn.get(uuid, [])
+        if not turn_records:
+            continue
+
+        next_uuid = turn_order[i + 1] if i + 1 < len(turn_order) else None
+        delta_tokens = 0
+        if next_uuid:
+            next_usage = turn_usage_by_uuid.get(next_uuid, {}) or {}
+            delta_tokens = int(next_usage.get("cache_creation_input_tokens") or 0)
+
+        if delta_tokens > 0:
+            total_bytes = sum(r.get("_result_bytes", 0) for r in turn_records)
+            if total_bytes > 0:
+                for r in turn_records:
+                    rb = r.get("_result_bytes", 0)
+                    share = int(round(delta_tokens * (rb / total_bytes)))
+                    cap = max(rb // _BYTE_TOKEN_CAP_DIVISOR, 0)
+                    if share > cap and cap > 0:
+                        r["_result_tokens_est"] = cap
+                        r["_token_estimate_method"] = "usage_delta_capped"
+                    else:
+                        r["_result_tokens_est"] = share
+                        r["_token_estimate_method"] = "usage_delta"
+                continue
+            # No bytes to weight: split evenly, no cap available
+            even = delta_tokens // len(turn_records)
+            for r in turn_records:
+                r["_result_tokens_est"] = even
+                r["_token_estimate_method"] = "usage_delta"
+            continue
+
+        # Fallback: char/4 per record
+        for r in turn_records:
+            r["_result_tokens_est"] = _estimate_tokens_from_bytes(r.get("_result_bytes", 0))
+            r["_token_estimate_method"] = "char_div_4"
+
+
+def _strip_prose_boilerplate(text):
+    """Remove <system-reminder>, <command-*> tags before prose hashing."""
+    if not isinstance(text, str):
+        return ""
+    return _RE_PROSE_BOILERPLATE.sub("", text).strip()
+
+
+def extract_user_prose(jsonl_path, project_name):
+    """Return prose records: user messages NOT correlated to a tool result.
+
+    Each record: {project, session, timestamp, _kind="prose", text, _char_len}
+    Tagged `_kind="prose"` so it's distinguishable from tool-call records.
+    Existing renderers ignore records lacking `tool_name`.
+    """
+    out = []
+    try:
+        size = os.path.getsize(jsonl_path)
+        if size > _MAX_SESSION_SIZE:
+            return out
+        with open(jsonl_path) as f:
+            lines = list(f)
+    except (OSError, UnicodeDecodeError):
+        return out
+
+    session_basename = os.path.basename(jsonl_path)
+    for line in lines:
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if obj.get("type") != "user":
+            continue
+        if obj.get("sourceToolAssistantUUID") or obj.get("toolUseID"):
+            continue
+        msg = obj.get("message", {})
+        content = msg.get("content")
+        text_parts = []
+        if isinstance(content, str):
+            text_parts.append(content)
+        elif isinstance(content, list):
+            for c in content:
+                if isinstance(c, dict) and c.get("type") == "text":
+                    t = c.get("text", "")
+                    if isinstance(t, str):
+                        text_parts.append(t)
+        text = _strip_prose_boilerplate("\n".join(text_parts))
+        if not text:
+            continue
+        out.append({
+            "project": project_name,
+            "session": session_basename,
+            "timestamp": obj.get("timestamp", ""),
+            "_kind": "prose",
+            "text": text,
+            "_char_len": len(text),
+        })
+    return out
+
+
 def process_session(jsonl_path, allow_patterns, project_name):
     """Process a single session JSONL file. Returns list of tool call records."""
     records = []
@@ -597,9 +834,29 @@ def process_session(jsonl_path, allow_patterns, project_name):
             continue
 
     assistant_by_uuid = {}
+    assistant_order = []  # chronological list of assistant uuids
     for obj in objects:
         if obj.get("type") == "assistant":
-            assistant_by_uuid[obj.get("uuid")] = obj
+            uuid = obj.get("uuid")
+            if uuid:
+                assistant_by_uuid[uuid] = obj
+                assistant_order.append(uuid)
+
+    # Sort assistant turns by timestamp (parsed_ts may be None for malformed)
+    def _ts_key(uuid):
+        ts = assistant_by_uuid[uuid].get("timestamp", "")
+        parsed = _parse_ts(ts) if ts else None
+        return (parsed or datetime.min.replace(tzinfo=timezone.utc),)
+    try:
+        assistant_order.sort(key=_ts_key)
+    except Exception:
+        pass  # keep insertion order if anything is unparseable
+
+    turn_usage_by_uuid = {
+        uuid: assistant_by_uuid[uuid].get("message", {}).get("usage", {}) or {}
+        for uuid in assistant_order
+    }
+    turn_index_by_uuid = {uuid: i for i, uuid in enumerate(assistant_order)}
 
     for obj in objects:
         if obj.get("type") != "user":
@@ -678,6 +935,13 @@ def process_session(jsonl_path, allow_patterns, project_name):
                 secret_category = _categorize_secret(original_cmd)
                 exposure_risk, _ = _classify_exposure_risk(original_cmd, secret_category)
 
+            # Token-attribution fields (Phase 1)
+            result_bytes = _compute_result_bytes(
+                obj.get("toolUseResult"),
+                obj.get("message", {}).get("content"),
+            )
+            input_target = _extract_input_target(tool_name, tool_input)
+
             records.append({
                 "project": project_name,
                 "session": os.path.basename(jsonl_path),
@@ -692,9 +956,558 @@ def process_session(jsonl_path, allow_patterns, project_name):
                 "_has_secrets": has_secrets,
                 "_secret_category": secret_category,
                 "_exposure_risk": exposure_risk,
+                "_input_target": input_target,
+                "_result_bytes": result_bytes,
+                "_turn_uuid": src_uuid,
+                "_turn_index": turn_index_by_uuid.get(src_uuid),
+                # _result_tokens_est and _token_estimate_method set by post-pass
+                "_result_tokens_est": 0,
+                "_token_estimate_method": "char_div_4",
             })
 
+    # Post-pass: attribute next-turn cache_creation tokens proportionally
+    attribute_tool_result_tokens(records, turn_usage_by_uuid, assistant_order)
+    annotate_next_turn_output(records, turn_usage_by_uuid, assistant_order)
+
     return records
+
+
+# --- Phase 2 detectors: token-consumption optimization ---
+#
+# All detectors are pure functions over record lists. Each returns a list of
+# uniform finding dicts with this shape:
+#   {
+#     "kind": "repeated_read" | "recipe_ngram" | "repeated_prose" | "resummarized_output",
+#     "target": str,            # canonical identifier (path / URL / step tuple / paragraph)
+#     "occurrences": int,       # total count
+#     "distinct_sessions": int, # how many sessions this appeared in
+#     "avg_tokens": int,        # avg per-occurrence token cost
+#     "sum_tokens": int,        # total token cost across all occurrences
+#     "sample_session_ids": [str],  # up to 5 session basenames
+#     "_raw": dict,             # detector-specific extra fields (n-gram steps, ratio, ...)
+#   }
+# A later phase (4) ranks/renders findings; detectors only filter by threshold.
+
+
+def _safe_allow_command_names():
+    """Extract bare command names from BASELINE_SAFE_ALLOW for n-gram filtering."""
+    names = set()
+    for pat in BASELINE_SAFE_ALLOW:
+        m = re.match(r'^Bash\(([\w-]+)', pat)
+        if m:
+            names.add(m.group(1))
+    return names
+
+
+def annotate_next_turn_output(records, turn_usage_by_uuid, turn_order):
+    """Add `_next_turn_output_tokens` to each record (0 when last turn).
+
+    Used by Pattern D (re-summarized outputs) to detect heavy summarization.
+    """
+    next_output_by_uuid = {}
+    for i, uuid in enumerate(turn_order):
+        next_uuid = turn_order[i + 1] if i + 1 < len(turn_order) else None
+        if next_uuid:
+            next_usage = turn_usage_by_uuid.get(next_uuid, {}) or {}
+            next_output_by_uuid[uuid] = int(next_usage.get("output_tokens") or 0)
+        else:
+            next_output_by_uuid[uuid] = 0
+    for r in records:
+        uuid = r.get("_turn_uuid")
+        if uuid:
+            r["_next_turn_output_tokens"] = next_output_by_uuid.get(uuid, 0)
+
+
+# --- Pattern A: repeated reads (Read / WebFetch) ---
+
+def find_repeated_reads(records, min_sessions=3, min_tokens=5000):
+    """Find Read/WebFetch targets read across many sessions, weighted by tokens.
+
+    Returns findings sorted by sum_tokens descending.
+    """
+    by_target = defaultdict(list)
+    for r in records:
+        if r.get("_kind") == "prose":
+            continue
+        if r.get("tool_name") not in ("Read", "WebFetch"):
+            continue
+        target = r.get("_input_target") or ""
+        if not target:
+            continue
+        by_target[target].append(r)
+
+    findings = []
+    for target, recs in by_target.items():
+        sessions = sorted({r.get("session", "") for r in recs if r.get("session")})
+        if len(sessions) < min_sessions:
+            continue
+        sum_tokens = sum(int(r.get("_result_tokens_est") or 0) for r in recs)
+        if sum_tokens < min_tokens:
+            continue
+        kind = "repeated_webfetch" if recs[0].get("tool_name") == "WebFetch" else "repeated_read"
+        findings.append({
+            "kind": kind,
+            "target": target,
+            "occurrences": len(recs),
+            "distinct_sessions": len(sessions),
+            "avg_tokens": sum_tokens // len(recs),
+            "sum_tokens": sum_tokens,
+            "sample_session_ids": sessions[:5],
+            "_raw": {
+                "tool_name": recs[0].get("tool_name"),
+                "last_seen": max((r.get("timestamp", "") for r in recs), default=""),
+            },
+        })
+    findings.sort(key=lambda f: -f["sum_tokens"])
+    return findings
+
+
+# --- Pattern B: recipe n-grams ---
+
+_RECIPE_IDLE_GAP_SECONDS = 600  # 10 minutes
+
+
+def _build_recipe_step(record):
+    """Reduce a tool-call record to a step token used for n-gram building."""
+    tool_name = record.get("tool_name", "")
+    target = record.get("_input_target") or ""
+    if tool_name == "Bash":
+        return target or "Bash"  # _input_target is normalize_command for Bash
+    if tool_name in ("Read", "Write", "Edit", "WebFetch", "WebSearch"):
+        return tool_name
+    if tool_name.startswith("mcp__"):
+        # Group by server + verb (mcp__server__action -> mcp:server:action)
+        parts = tool_name.split("__")
+        if len(parts) >= 3:
+            return f"mcp:{parts[1]}:{parts[2]}"
+        return tool_name
+    return tool_name
+
+
+def _segment_session_records(session_records, gap_seconds=_RECIPE_IDLE_GAP_SECONDS):
+    """Split a session's records into idle-gap-separated segments."""
+    if not session_records:
+        return []
+    sorted_recs = sorted(
+        session_records,
+        key=lambda r: r.get("_turn_index") if r.get("_turn_index") is not None else 0,
+    )
+    segments = []
+    current = [sorted_recs[0]]
+    last_ts = _parse_ts(sorted_recs[0].get("timestamp", ""))
+    for r in sorted_recs[1:]:
+        ts = _parse_ts(r.get("timestamp", ""))
+        if last_ts and ts:
+            gap = (ts - last_ts).total_seconds()
+            if gap > gap_seconds:
+                segments.append(current)
+                current = []
+        current.append(r)
+        if ts:
+            last_ts = ts
+    if current:
+        segments.append(current)
+    return segments
+
+
+def _collapse_runs(steps):
+    """Collapse consecutive identical steps: A,A,A,B,B,A -> A,B,A."""
+    out = []
+    for s in steps:
+        if not out or out[-1] != s:
+            out.append(s)
+    return out
+
+
+def find_recipe_ngrams(records, ns=(3, 4, 5), min_occurrences=5, min_sessions=2):
+    """Find recurring n-gram sequences of tool calls.
+
+    Returns findings sorted by occurrences * n descending.
+    """
+    safe_allow = _safe_allow_command_names()
+
+    # Group by (project, session), then segment by idle gap
+    by_session = defaultdict(list)
+    for r in records:
+        if r.get("_kind") == "prose":
+            continue
+        if not r.get("tool_name"):
+            continue
+        key = (r.get("project", ""), r.get("session", ""))
+        by_session[key].append(r)
+
+    # Aggregate n-grams: tuple -> {occurrences, sessions, sum_tokens}
+    ngram_stats = defaultdict(lambda: {
+        "occurrences": 0,
+        "sessions": set(),
+        "sum_tokens": 0,
+        "n": 0,
+    })
+
+    for (project, session), recs in by_session.items():
+        for segment in _segment_session_records(recs):
+            steps = _collapse_runs([_build_recipe_step(r) for r in segment])
+            seg_token_costs = {}  # step-index -> tokens (for windowed sum)
+            # Build per-step tokens parallel to collapsed steps; collapsing
+            # loses the original record alignment, so use segment-level avg
+            avg_tok = (
+                sum(int(r.get("_result_tokens_est") or 0) for r in segment)
+                / max(len(segment), 1)
+            )
+            for n in ns:
+                if len(steps) < n:
+                    continue
+                for i in range(len(steps) - n + 1):
+                    window = tuple(steps[i:i + n])
+                    # Reject: only one distinct step in window
+                    if len(set(window)) <= 1:
+                        continue
+                    # Reject: every step is a baseline-safe-allow Bash command
+                    if all(s in safe_allow for s in window):
+                        continue
+                    stats = ngram_stats[window]
+                    stats["occurrences"] += 1
+                    stats["sessions"].add(session)
+                    stats["sum_tokens"] += int(avg_tok * n)
+                    stats["n"] = n
+
+    # Build raw findings list
+    raw_findings = []
+    for ngram, stats in ngram_stats.items():
+        if stats["occurrences"] < min_occurrences:
+            continue
+        if len(stats["sessions"]) < min_sessions:
+            continue
+        sessions = sorted(stats["sessions"])
+        raw_findings.append({
+            "ngram": ngram,
+            "occurrences": stats["occurrences"],
+            "distinct_sessions": len(stats["sessions"]),
+            "sum_tokens": stats["sum_tokens"],
+            "n": stats["n"],
+            "sessions": sessions,
+        })
+
+    # Dedupe: drop a shorter n-gram that's fully contained in a longer one with
+    # comparable count (within 20%).
+    raw_findings.sort(key=lambda f: (-f["n"], -f["occurrences"]))
+    suppressed = set()
+    for i, longer in enumerate(raw_findings):
+        if i in suppressed:
+            continue
+        for j, shorter in enumerate(raw_findings):
+            if j == i or j in suppressed:
+                continue
+            if shorter["n"] >= longer["n"]:
+                continue
+            # Is shorter contained in longer?
+            ln = longer["ngram"]
+            sn = shorter["ngram"]
+            contained = any(
+                ln[k:k + len(sn)] == sn for k in range(len(ln) - len(sn) + 1)
+            )
+            if not contained:
+                continue
+            # Comparable count?
+            if shorter["occurrences"] <= longer["occurrences"] * 1.2:
+                suppressed.add(j)
+
+    findings = []
+    for i, raw in enumerate(raw_findings):
+        if i in suppressed:
+            continue
+        findings.append({
+            "kind": "recipe_ngram",
+            "target": " → ".join(raw["ngram"]),
+            "occurrences": raw["occurrences"],
+            "distinct_sessions": raw["distinct_sessions"],
+            "avg_tokens": raw["sum_tokens"] // raw["occurrences"],
+            "sum_tokens": raw["sum_tokens"],
+            "sample_session_ids": raw["sessions"][:5],
+            "_raw": {
+                "n": raw["n"],
+                "steps": list(raw["ngram"]),
+            },
+        })
+    findings.sort(key=lambda f: -(f["occurrences"] * f["_raw"]["n"]))
+    return findings
+
+
+# --- Pattern C: repeated user prose ---
+
+_RE_PROSE_NUMBER = re.compile(r'\b\d[\d,.]*\b')
+_RE_PROSE_WS = re.compile(r'\s+')
+
+
+def _normalize_prose_text(text):
+    """Lowercase, collapse whitespace, replace numeric tokens with <N>."""
+    if not isinstance(text, str):
+        return ""
+    t = text.lower()
+    t = _RE_PROSE_NUMBER.sub("<N>", t)
+    t = _RE_PROSE_WS.sub(" ", t).strip()
+    return t
+
+
+def _hash_prose(normalized):
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def find_repeated_prose(prose_records, min_occurrences=3, min_chars=400):
+    """Find recurring prose paragraphs the user pastes across sessions.
+
+    Splits each prose block into paragraphs (>= min_chars each), normalizes,
+    SHA256-hashes, and clusters exact matches. Near-duplicate clustering is
+    intentionally deferred (would require MinHash; tracked in plan).
+    """
+    by_hash = defaultdict(lambda: {
+        "occurrences": 0,
+        "sessions": set(),
+        "char_lens": [],
+        "exemplar": "",
+    })
+
+    for p in prose_records:
+        if p.get("_kind") != "prose":
+            continue
+        text = p.get("text", "")
+        if not isinstance(text, str):
+            continue
+        # Split on blank lines into paragraphs
+        for para in re.split(r'\n\s*\n', text):
+            para = para.strip()
+            if len(para) < min_chars:
+                continue
+            normalized = _normalize_prose_text(para)
+            if not normalized:
+                continue
+            h = _hash_prose(normalized)
+            entry = by_hash[h]
+            entry["occurrences"] += 1
+            entry["sessions"].add(p.get("session", ""))
+            entry["char_lens"].append(len(para))
+            if not entry["exemplar"]:
+                entry["exemplar"] = para
+
+    findings = []
+    for h, entry in by_hash.items():
+        if entry["occurrences"] < min_occurrences:
+            continue
+        avg_chars = sum(entry["char_lens"]) // len(entry["char_lens"])
+        sum_chars = sum(entry["char_lens"])
+        # Token estimate: char count / 4
+        avg_tokens = avg_chars // 4
+        sum_tokens = sum_chars // 4
+        sessions = sorted(s for s in entry["sessions"] if s)
+        findings.append({
+            "kind": "repeated_prose",
+            "target": entry["exemplar"][:120],
+            "occurrences": entry["occurrences"],
+            "distinct_sessions": len(sessions),
+            "avg_tokens": avg_tokens,
+            "sum_tokens": sum_tokens,
+            "sample_session_ids": sessions[:5],
+            "_raw": {
+                "hash": h,
+                "avg_chars": avg_chars,
+                "exemplar_full": entry["exemplar"],
+            },
+        })
+    findings.sort(key=lambda f: -f["sum_tokens"])
+    return findings
+
+
+# --- Pattern D: large outputs that get re-summarized ---
+
+def find_resummarized_outputs(records, min_bytes=8000, max_narrow_ratio=0.25,
+                                min_occurrences=3):
+    """Find tool outputs that are large but get heavily summarized in the next turn.
+
+    Signal: `next_turn_output_tokens / result_tokens_est < max_narrow_ratio`.
+    Aggregated by `_input_target` so a recurring "huge output → tiny summary"
+    pattern surfaces a wrapper-script suggestion.
+    """
+    by_target = defaultdict(list)
+    for r in records:
+        if r.get("_kind") == "prose":
+            continue
+        if not r.get("tool_name"):
+            continue
+        rb = int(r.get("_result_bytes") or 0)
+        if rb < min_bytes:
+            continue
+        result_tokens = int(r.get("_result_tokens_est") or 0)
+        if result_tokens <= 0:
+            continue
+        next_out = int(r.get("_next_turn_output_tokens") or 0)
+        if next_out <= 0:
+            continue
+        ratio = next_out / result_tokens
+        if ratio >= max_narrow_ratio:
+            continue
+        target = r.get("_input_target") or r.get("display") or r.get("tool_name", "")
+        by_target[target].append((r, ratio))
+
+    findings = []
+    for target, items in by_target.items():
+        if len(items) < min_occurrences:
+            continue
+        sessions = sorted({r.get("session", "") for r, _ in items if r.get("session")})
+        sum_tokens = sum(int(r.get("_result_tokens_est") or 0) for r, _ in items)
+        avg_ratio = sum(ratio for _, ratio in items) / len(items)
+        avg_input_bytes = sum(int(r.get("_result_bytes") or 0) for r, _ in items) // len(items)
+        findings.append({
+            "kind": "resummarized_output",
+            "target": target,
+            "occurrences": len(items),
+            "distinct_sessions": len(sessions),
+            "avg_tokens": sum_tokens // len(items),
+            "sum_tokens": sum_tokens,
+            "sample_session_ids": sessions[:5],
+            "_raw": {
+                "narrow_ratio": round(avg_ratio, 3),
+                "avg_input_bytes": avg_input_bytes,
+                "tool_name": items[0][0].get("tool_name"),
+            },
+        })
+    findings.sort(key=lambda f: -f["sum_tokens"])
+    return findings
+
+
+# --- Phase 3: stability weighting + scoring ---
+#
+# A finding is more valuable if the underlying source is stable. Volatile
+# files would produce stale reference docs (worse than re-deriving) so we
+# multiply each finding's raw score by a `stability_factor` in [0.1, 1.0],
+# where 1.0 = highly stable (no recent commits) and 0.1 = very volatile.
+#
+# Note: an earlier draft of the plan called this `churn_factor` and used
+# division. That math actually *boosted* volatile items (low factor → small
+# divisor → large score), the opposite of the stated intent. Switched to
+# multiplication with a stability framing during implementation.
+
+_STABILITY_GIT_TIMEOUT_SECONDS = 2
+_STABILITY_DEFAULT_SINCE_DAYS = 180
+
+
+def _resolve_target_path(target):
+    """Map a finding target to an absolute filesystem path, or None.
+
+    Targets from `_normalize_read_target` use `~/...` form.
+    """
+    if not target or not isinstance(target, str):
+        return None
+    if target.startswith("~/") or target == "~":
+        return os.path.expanduser(target)
+    if target.startswith("/"):
+        return target
+    return None
+
+
+@lru_cache(maxsize=2048)
+def _git_commit_count(abs_path, since_days=_STABILITY_DEFAULT_SINCE_DAYS):
+    """Count commits touching `abs_path` in the last `since_days` days.
+
+    Returns None when git is unavailable, the path is not in a git repo, or
+    the subprocess times out. Cached per-process via lru_cache so repeated
+    findings against the same path don't fork git multiple times.
+    """
+    if not abs_path:
+        return None
+    parent = os.path.dirname(abs_path)
+    if not parent or not os.path.isdir(parent):
+        parent = "."
+    try:
+        result = subprocess.run(
+            ["git", "log", "--follow", f"--since={since_days} days ago",
+             "--pretty=oneline", "--", abs_path],
+            cwd=parent,
+            capture_output=True, text=True,
+            timeout=_STABILITY_GIT_TIMEOUT_SECONDS,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return None
+    if result.returncode != 0:
+        return None
+    return sum(1 for line in result.stdout.splitlines() if line.strip())
+
+
+def _stability_from_commit_count(n):
+    """Commit count -> stability. Many commits = volatile = low factor."""
+    if n == 0:
+        return 1.0
+    if n <= 3:
+        return 0.8
+    if n <= 10:
+        return 0.5
+    if n <= 30:
+        return 0.25
+    return 0.1
+
+
+def _stability_from_mtime(mtime):
+    """Untracked-file fallback. Recently modified = volatile = low factor."""
+    age_days = (time.time() - mtime) / 86400
+    if age_days < 7:
+        return 0.5
+    if age_days < 30:
+        return 0.7
+    return 1.0
+
+
+def compute_stability_factor(target, kind):
+    """Return a stability factor in [0.1, 1.0]. Higher = safer to cache.
+
+    Dispatches by finding kind:
+      - repeated_prose: 1.0 (text the user typed; not a moving target)
+      - repeated_webfetch: 0.7 (external — verify freshness)
+      - recipe_ngram: 1.0 (steps don't carry literal file args)
+      - repeated_read / resummarized_output: file-based (git or mtime)
+    """
+    if kind == "repeated_prose":
+        return 1.0
+    if kind == "repeated_webfetch":
+        return 0.7
+    if kind == "recipe_ngram":
+        return 1.0
+
+    path = _resolve_target_path(target)
+    if not path:
+        return 0.7
+    n = _git_commit_count(path)
+    if n is not None:
+        return _stability_from_commit_count(n)
+    if not os.path.exists(path):
+        return 0.7
+    try:
+        return _stability_from_mtime(os.path.getmtime(path))
+    except OSError:
+        return 0.7
+
+
+def score_finding(finding, stability_factor):
+    """Ranking score: occurrences * avg_tokens * stability_factor.
+
+    Volatile sources (low factor) get discounted because reference docs
+    derived from them would go stale.
+    """
+    occ = int(finding.get("occurrences") or 0)
+    avg = int(finding.get("avg_tokens") or 0)
+    return occ * avg * max(stability_factor, 0.1)
+
+
+def rank_findings(findings):
+    """Annotate findings with stability + score, then sort by score descending.
+
+    Mutates each finding in place adding `_stability_factor` and `_score`.
+    Returns the same list, sorted.
+    """
+    for f in findings:
+        stab = compute_stability_factor(f.get("target", ""), f.get("kind", ""))
+        f["_stability_factor"] = stab
+        f["_score"] = score_finding(f, stab)
+    findings.sort(key=lambda f: -f["_score"])
+    return findings
 
 
 # --- Report rendering ---
