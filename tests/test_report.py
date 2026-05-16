@@ -5,6 +5,7 @@ import importlib.util
 import io
 import os
 import sys
+import unittest.mock
 
 # Import the report module by file path (it has hyphens in the name)
 spec = importlib.util.spec_from_file_location(
@@ -460,6 +461,577 @@ report.render_trend(trend_records, bucket="day", out=buf)
 trend_out = buf.getvalue()
 check(len(trend_out) > 0, "trend output is non-empty")
 check("TREND ANALYSIS" in trend_out, "trend has header")
+
+
+# =============================================================================
+# Token-attribution: read target normalization
+# =============================================================================
+print("\n=== Read target normalization ===")
+home = os.path.expanduser("~")
+check(report._normalize_read_target(home + "/autoclaude/x.py") == "~/autoclaude/x.py", "home -> ~")
+check(report._normalize_read_target("/etc/passwd") == "/etc/passwd", "non-home path unchanged")
+check(report._normalize_read_target("") == "", "empty -> empty")
+check(report._normalize_read_target(None) == "", "None -> empty")
+
+
+# =============================================================================
+# Token-attribution: URL normalization
+# =============================================================================
+print("\n=== URL normalization ===")
+check(report._normalize_url("HTTPS://Example.COM/path") == "https://example.com/path", "scheme+host lowercased")
+check(report._normalize_url("https://example.com/x?q=1") == "https://example.com/x", "query stripped")
+check(report._normalize_url("https://example.com/x#frag") == "https://example.com/x", "fragment stripped")
+check(report._normalize_url("https://example.com/x?q=1#frag") == "https://example.com/x", "query+fragment stripped")
+check(report._normalize_url("") == "", "empty -> empty")
+check(report._normalize_url("not-a-url") == "not-a-url", "non-URL passes through")
+
+
+# =============================================================================
+# Token-attribution: input target extraction (dispatch)
+# =============================================================================
+print("\n=== Input target extraction ===")
+check(report._extract_input_target("Read", {"file_path": home + "/x.py"}) == "~/x.py", "Read -> normalized path")
+check(report._extract_input_target("Write", {"file_path": "/tmp/x"}) == "/tmp/x", "Write -> path")
+check(report._extract_input_target("Edit", {"file_path": "/tmp/x"}) == "/tmp/x", "Edit -> path")
+check(report._extract_input_target("WebFetch", {"url": "https://Example.com/?q=1"}) == "https://example.com/", "WebFetch -> normalized URL")
+check(report._extract_input_target("Bash", {"command": "git status"}) == "git status", "Bash -> normalized command")
+check(report._extract_input_target("WebSearch", {"query": "anything"}) == "", "WebSearch -> empty (no target)")
+check(report._extract_input_target("Read", {}) == "", "missing field -> empty")
+check(report._extract_input_target("Read", "not-a-dict") == "", "non-dict input -> empty")
+
+
+# =============================================================================
+# Token-attribution: result byte counting
+# =============================================================================
+print("\n=== Result byte counting ===")
+check(report._compute_result_bytes({"stdout": "abc", "stderr": "de"}, None) == 5, "Bash dict stdout+stderr")
+check(report._compute_result_bytes({"stdout": "abc"}, None) == 3, "Bash dict stdout only")
+check(report._compute_result_bytes("hello", None) == 5, "string toolUseResult")
+check(report._compute_result_bytes(None, "from-msg") == 8, "fallback to string msg.content")
+check(report._compute_result_bytes(None, [{"type": "tool_result", "content": "abcdef"}]) == 6, "fallback to list msg.content (str)")
+check(report._compute_result_bytes(None, [{"type": "tool_result", "content": [{"type": "text", "text": "abcd"}]}]) == 4, "fallback to list msg.content (list of text)")
+check(report._compute_result_bytes(None, None) == 0, "no source -> 0")
+check(report._compute_result_bytes({}, None) == 0, "empty dict -> 0")
+check(report._compute_result_bytes({"interrupted": False, "stdout": "x"}, None) == 1, "ignores non-string fields")
+
+
+# =============================================================================
+# Token-attribution: byte->token fallback
+# =============================================================================
+print("\n=== Byte to token fallback ===")
+check(report._estimate_tokens_from_bytes(0) == 0, "zero bytes -> 0 tokens")
+check(report._estimate_tokens_from_bytes(4) == 1, "4 bytes -> 1 token")
+check(report._estimate_tokens_from_bytes(100) == 25, "100 bytes -> 25 tokens")
+check(report._estimate_tokens_from_bytes(-5) == 0, "negative clamped to 0")
+
+
+# =============================================================================
+# Token-attribution: proportional split + cap behavior
+# =============================================================================
+print("\n=== Token attribution (attribute_tool_result_tokens) ===")
+
+# Single tool, modest delta below cap: gets full delta
+recs = [{"_turn_uuid": "A", "_result_bytes": 3000}]
+report.attribute_tool_result_tokens(recs, {"A": {}, "B": {"cache_creation_input_tokens": 500}}, ["A", "B"])
+check(recs[0]["_result_tokens_est"] == 500, f"single tool, delta below cap -> 500 (got {recs[0]['_result_tokens_est']})")
+check(recs[0]["_token_estimate_method"] == "usage_delta", "method=usage_delta when no cap")
+
+# Single tool, delta above cap (cap = bytes/3 = 100): capped
+recs = [{"_turn_uuid": "A", "_result_bytes": 300}]
+report.attribute_tool_result_tokens(recs, {"A": {}, "B": {"cache_creation_input_tokens": 50000}}, ["A", "B"])
+check(recs[0]["_result_tokens_est"] == 100, f"capped at bytes/3=100 (got {recs[0]['_result_tokens_est']})")
+check(recs[0]["_token_estimate_method"] == "usage_delta_capped", "method=usage_delta_capped")
+
+# Two tools in parallel, proportional split by bytes
+recs = [
+    {"_turn_uuid": "A", "_result_bytes": 9000},
+    {"_turn_uuid": "A", "_result_bytes": 3000},
+]
+report.attribute_tool_result_tokens(recs, {"A": {}, "B": {"cache_creation_input_tokens": 1200}}, ["A", "B"])
+check(recs[0]["_result_tokens_est"] == 900, f"75% share -> 900 (got {recs[0]['_result_tokens_est']})")
+check(recs[1]["_result_tokens_est"] == 300, f"25% share -> 300 (got {recs[1]['_result_tokens_est']})")
+
+# Last turn has no next-turn delta -> char/4 fallback
+recs = [{"_turn_uuid": "Z", "_result_bytes": 400}]
+report.attribute_tool_result_tokens(recs, {"Z": {}}, ["Z"])
+check(recs[0]["_result_tokens_est"] == 100, f"last turn fallback char/4 -> 100 (got {recs[0]['_result_tokens_est']})")
+check(recs[0]["_token_estimate_method"] == "char_div_4", "method=char_div_4 when last")
+
+# Missing usage on next turn -> fallback
+recs = [{"_turn_uuid": "A", "_result_bytes": 200}]
+report.attribute_tool_result_tokens(recs, {"A": {}, "B": {}}, ["A", "B"])
+check(recs[0]["_token_estimate_method"] == "char_div_4", "no cache_creation -> char/4 fallback")
+check(recs[0]["_result_tokens_est"] == 50, "200 bytes -> 50 tokens fallback")
+
+# Zero bytes + delta -> even split with usage_delta
+recs = [
+    {"_turn_uuid": "A", "_result_bytes": 0},
+    {"_turn_uuid": "A", "_result_bytes": 0},
+]
+report.attribute_tool_result_tokens(recs, {"A": {}, "B": {"cache_creation_input_tokens": 100}}, ["A", "B"])
+check(recs[0]["_result_tokens_est"] == 50 and recs[1]["_result_tokens_est"] == 50, "zero-bytes splits evenly")
+
+# Records without _turn_uuid are ignored, not crashed
+recs = [{"_result_bytes": 100}, {"_turn_uuid": "A", "_result_bytes": 100}]
+report.attribute_tool_result_tokens(recs, {"A": {}}, ["A"])
+check("_result_tokens_est" not in recs[0], "record without turn_uuid is skipped")
+check(recs[1]["_token_estimate_method"] == "char_div_4", "tagged record is processed")
+
+
+# =============================================================================
+# Prose extraction: boilerplate stripping
+# =============================================================================
+print("\n=== Prose boilerplate stripping ===")
+out = report._strip_prose_boilerplate("hello <system-reminder>noise</system-reminder> world")
+check(out == "hello  world", f"system-reminder stripped (got {out!r})")
+out = report._strip_prose_boilerplate("<command-name>foo</command-name>real text")
+check(out == "real text", f"command-name stripped (got {out!r})")
+out = report._strip_prose_boilerplate("<system-reminder>line1\nline2</system-reminder>kept")
+check(out == "kept", f"multi-line system-reminder stripped (got {out!r})")
+check(report._strip_prose_boilerplate("") == "", "empty -> empty")
+check(report._strip_prose_boilerplate(None) == "", "None -> empty")
+check(report._strip_prose_boilerplate("plain text") == "plain text", "plain text unchanged")
+
+
+# =============================================================================
+# Phase 2: annotate_next_turn_output
+# =============================================================================
+print("\n=== annotate_next_turn_output ===")
+recs = [
+    {"_turn_uuid": "A"},
+    {"_turn_uuid": "B"},
+]
+report.annotate_next_turn_output(
+    recs,
+    {"A": {"output_tokens": 100}, "B": {"output_tokens": 50}},
+    ["A", "B"],
+)
+check(recs[0]["_next_turn_output_tokens"] == 50, "turn A sees turn B output")
+check(recs[1]["_next_turn_output_tokens"] == 0, "last turn -> 0")
+
+# Records without turn_uuid are ignored without crashing
+recs2 = [{"foo": "bar"}, {"_turn_uuid": "X"}]
+report.annotate_next_turn_output(recs2, {"X": {"output_tokens": 10}}, ["X"])
+check("_next_turn_output_tokens" not in recs2[0], "no turn_uuid -> no annotation")
+check(recs2[1]["_next_turn_output_tokens"] == 0, "last turn fallback")
+
+
+# =============================================================================
+# Phase 2 Pattern A: find_repeated_reads
+# =============================================================================
+print("\n=== find_repeated_reads ===")
+
+def _read_record(session, target, tokens, ts="2026-05-15T00:00:00Z", tool="Read"):
+    return {
+        "tool_name": tool, "session": session, "_input_target": target,
+        "_result_tokens_est": tokens, "_kind": None, "timestamp": ts,
+    }
+
+# Below thresholds: not flagged
+recs = [_read_record(f"s{i}", "~/x.py", 1000) for i in range(2)]
+out = report.find_repeated_reads(recs, min_sessions=3, min_tokens=5000)
+check(out == [], "2 sessions doesn't meet min_sessions=3")
+
+# Meets sessions but not tokens
+recs = [_read_record(f"s{i}", "~/x.py", 100) for i in range(3)]
+out = report.find_repeated_reads(recs, min_sessions=3, min_tokens=5000)
+check(out == [], "3 sessions, 300 tokens doesn't meet min_tokens=5000")
+
+# Meets both
+recs = [_read_record(f"s{i}", "~/x.py", 2000) for i in range(3)]
+out = report.find_repeated_reads(recs, min_sessions=3, min_tokens=5000)
+check(len(out) == 1 and out[0]["target"] == "~/x.py", "meets both -> finding")
+check(out[0]["sum_tokens"] == 6000 and out[0]["occurrences"] == 3, "sum_tokens=6000 occ=3")
+check(out[0]["distinct_sessions"] == 3, "distinct_sessions=3")
+check(out[0]["kind"] == "repeated_read", "kind=repeated_read")
+check(out[0]["avg_tokens"] == 2000, "avg_tokens=2000")
+
+# WebFetch produces repeated_webfetch kind
+recs = [_read_record(f"s{i}", "https://x.com/", 3000, tool="WebFetch") for i in range(3)]
+out = report.find_repeated_reads(recs)
+check(out[0]["kind"] == "repeated_webfetch", "WebFetch -> repeated_webfetch kind")
+
+# Empty target ignored
+recs = [_read_record(f"s{i}", "", 5000) for i in range(5)]
+out = report.find_repeated_reads(recs)
+check(out == [], "empty target ignored")
+
+# Other tools ignored
+recs = [{"tool_name": "Bash", "session": f"s{i}", "_input_target": "ls",
+         "_result_tokens_est": 5000, "timestamp": "2026-05-15T00:00:00Z"} for i in range(5)]
+out = report.find_repeated_reads(recs)
+check(out == [], "Bash records ignored")
+
+# Prose records ignored
+recs = [{"_kind": "prose", "tool_name": None, "session": f"s{i}",
+         "_input_target": "~/x.py", "_result_tokens_est": 5000} for i in range(5)]
+out = report.find_repeated_reads(recs)
+check(out == [], "prose records ignored")
+
+# Sorted by sum_tokens descending
+recs = (
+    [_read_record(f"a{i}", "~/big", 3000) for i in range(3)] +
+    [_read_record(f"b{i}", "~/small", 2000) for i in range(3)]
+)
+out = report.find_repeated_reads(recs, min_tokens=5000)
+check(out[0]["target"] == "~/big" and out[1]["target"] == "~/small", "sorted by sum_tokens desc")
+
+# Sample sessions truncated to 5
+recs = [_read_record(f"s{i}", "~/x", 1000) for i in range(8)]
+out = report.find_repeated_reads(recs, min_tokens=5000)
+check(len(out[0]["sample_session_ids"]) == 5, "sample_session_ids capped at 5")
+
+
+# =============================================================================
+# Phase 2 Pattern B: find_recipe_ngrams
+# =============================================================================
+print("\n=== find_recipe_ngrams ===")
+
+def _step_rec(session, tool, target, idx, ts_minute=0):
+    return {
+        "tool_name": tool, "session": session, "project": "p",
+        "_input_target": target, "_turn_index": idx,
+        "_result_tokens_est": 100,
+        "timestamp": f"2026-05-15T00:{ts_minute:02d}:00Z",
+    }
+
+# Build same Read-Edit-Read recipe across 3 sessions, 6 times each = 18 occurrences
+recs = []
+for s in ("s1", "s2", "s3"):
+    for cycle in range(6):
+        base = cycle * 3
+        recs.append(_step_rec(s, "Read", "~/a", base + 0, base))
+        recs.append(_step_rec(s, "Edit", "~/a", base + 1, base))
+        recs.append(_step_rec(s, "Read", "~/a", base + 2, base))
+out = report.find_recipe_ngrams(recs, min_occurrences=5, min_sessions=2)
+# After collapse_runs the sequence is Read,Edit,Read,Edit,Read,Edit,...
+check(any("Read → Edit → Read" in f["target"] for f in out), "Read→Edit→Read recipe found")
+
+# Single-step n-gram (A,A,A) rejected
+recs = []
+for s in ("s1", "s2", "s3"):
+    for i in range(15):
+        recs.append(_step_rec(s, "Read", "~/x", i, i))
+out = report.find_recipe_ngrams(recs, min_occurrences=3, min_sessions=2)
+check(out == [], "all-same-step n-gram rejected (collapses to 1 distinct)")
+
+# Idle gap segmentation: gap > 10 min splits sequences
+recs = []
+# Session with two segments: [Read,Edit,Read] then 11min gap then [Read,Edit,Read]
+seq_a = [("Read","~/a",0,0), ("Edit","~/a",1,0), ("Read","~/a",2,0)]
+seq_b = [("Read","~/b",3,11), ("Edit","~/b",4,11), ("Read","~/b",5,11)]
+for tool, tgt, idx, mn in seq_a + seq_b:
+    recs.append(_step_rec("s1", tool, tgt, idx, mn))
+# Add same pattern in 2 more sessions to meet min_occurrences=2
+for s in ("s2", "s3"):
+    for tool, tgt, idx, mn in seq_a + seq_b:
+        recs.append(_step_rec(s, tool, tgt, idx, mn))
+out = report.find_recipe_ngrams(recs, min_occurrences=3, min_sessions=2)
+# Each session contributes 2 segments × the same 3-step recipe = 6 occurrences across 3 sessions
+check(any("Read → Edit → Read" in f["target"] for f in out), "idle-gap segments still produce ngrams")
+
+# All-safe-allow rejection: cat→ls→pwd should be filtered
+recs = []
+for s in ("s1", "s2", "s3"):
+    for cycle in range(6):
+        base = cycle * 3
+        recs.append(_step_rec(s, "Bash", "cat", base + 0, base))
+        recs.append(_step_rec(s, "Bash", "ls",  base + 1, base))
+        recs.append(_step_rec(s, "Bash", "pwd", base + 2, base))
+out = report.find_recipe_ngrams(recs, min_occurrences=3, min_sessions=2)
+check(out == [], "all-baseline-safe-allow chain rejected")
+
+# Below min_occurrences: not flagged
+recs = []
+for s in ("s1", "s2"):
+    recs.append(_step_rec(s, "Read", "~/a", 0, 0))
+    recs.append(_step_rec(s, "Edit", "~/a", 1, 0))
+    recs.append(_step_rec(s, "Read", "~/a", 2, 0))
+out = report.find_recipe_ngrams(recs, min_occurrences=5, min_sessions=2)
+check(out == [], "1 occ per session, 2 sessions < min_occurrences=5")
+
+# Single session: rejected by min_sessions
+recs = []
+for cycle in range(10):
+    base = cycle * 3
+    recs.append(_step_rec("s1", "Read", "~/a", base+0, base))
+    recs.append(_step_rec("s1", "Edit", "~/a", base+1, base))
+    recs.append(_step_rec("s1", "Read", "~/a", base+2, base))
+out = report.find_recipe_ngrams(recs, min_occurrences=3, min_sessions=2)
+check(out == [], "single session rejected by min_sessions=2")
+
+# Empty input
+check(report.find_recipe_ngrams([]) == [], "empty records -> []")
+
+# Run-collapsing: A,A,B,B,C
+check(report._collapse_runs(["A","A","B","B","C"]) == ["A","B","C"], "_collapse_runs basic")
+check(report._collapse_runs([]) == [], "_collapse_runs empty")
+check(report._collapse_runs(["X"]) == ["X"], "_collapse_runs single")
+
+
+# =============================================================================
+# Phase 2 Pattern C: find_repeated_prose
+# =============================================================================
+print("\n=== find_repeated_prose ===")
+
+def _prose_rec(session, text):
+    return {"_kind": "prose", "session": session, "text": text, "_char_len": len(text)}
+
+para = "Hello world. " * 50  # ~650 chars
+recs = [_prose_rec(f"s{i}", para) for i in range(3)]
+out = report.find_repeated_prose(recs, min_occurrences=3, min_chars=400)
+check(len(out) == 1, f"3 identical paragraphs -> 1 finding (got {len(out)})")
+check(out[0]["occurrences"] == 3 and out[0]["distinct_sessions"] == 3, "occ=3 sessions=3")
+
+# Short paragraphs ignored
+recs = [_prose_rec(f"s{i}", "short.") for i in range(5)]
+out = report.find_repeated_prose(recs, min_chars=400)
+check(out == [], "short paragraphs ignored")
+
+# Below min_occurrences
+recs = [_prose_rec(f"s{i}", para) for i in range(2)]
+out = report.find_repeated_prose(recs, min_occurrences=3, min_chars=400)
+check(out == [], "below min_occurrences -> []")
+
+# Numeric tokens normalized: same paragraph differing only in numbers should cluster
+para_with_dates = "Today is " + "2026-05-15. " * 50
+recs = []
+for s, ymd in [("s1", "2026-05-15"), ("s2", "2026-06-20"), ("s3", "2027-01-01")]:
+    recs.append(_prose_rec(s, "Today is " + (ymd + ". ") * 50))
+out = report.find_repeated_prose(recs, min_occurrences=3, min_chars=400)
+check(len(out) == 1, "date variants normalize to same hash")
+
+# Non-prose records ignored
+recs = [{"_kind": "tool_call", "session": "s1", "text": para}]
+out = report.find_repeated_prose(recs, min_chars=400)
+check(out == [], "non-prose ignored")
+
+# Multi-paragraph splits on blank lines
+multi = para + "\n\n" + ("Other long paragraph. " * 50)
+recs = [_prose_rec(f"s{i}", multi) for i in range(3)]
+out = report.find_repeated_prose(recs, min_occurrences=3, min_chars=400)
+check(len(out) == 2, f"2 distinct paragraphs -> 2 findings (got {len(out)})")
+
+# Empty input
+check(report.find_repeated_prose([]) == [], "empty records -> []")
+
+# _normalize_prose_text spot checks
+check(report._normalize_prose_text("Hello   World") == "hello world", "whitespace collapsed")
+check(report._normalize_prose_text("ID 12345 here") == "id <N> here", "numbers replaced")
+check(report._normalize_prose_text("") == "", "empty -> empty")
+check(report._normalize_prose_text(None) == "", "None -> empty")
+
+
+# =============================================================================
+# Phase 2 Pattern D: find_resummarized_outputs
+# =============================================================================
+print("\n=== find_resummarized_outputs ===")
+
+def _output_rec(session, target, bytes_, est_tokens, next_out_tokens, tool="Read"):
+    return {
+        "tool_name": tool, "session": session, "_input_target": target,
+        "_result_bytes": bytes_, "_result_tokens_est": est_tokens,
+        "_next_turn_output_tokens": next_out_tokens,
+    }
+
+# Large output, tiny next-turn summary -> flagged
+recs = [_output_rec(f"s{i}", "~/big", 50000, 12000, 500) for i in range(3)]
+out = report.find_resummarized_outputs(recs, min_bytes=8000, max_narrow_ratio=0.25, min_occurrences=3)
+check(len(out) == 1 and out[0]["target"] == "~/big", "large output + tiny summary flagged")
+check(out[0]["_raw"]["narrow_ratio"] < 0.25, f"narrow_ratio < 0.25 (got {out[0]['_raw']['narrow_ratio']})")
+
+# Below min_bytes
+recs = [_output_rec(f"s{i}", "~/small", 1000, 250, 10) for i in range(3)]
+out = report.find_resummarized_outputs(recs, min_bytes=8000)
+check(out == [], "below min_bytes ignored")
+
+# Ratio above threshold (large output, large summary too)
+recs = [_output_rec(f"s{i}", "~/x", 50000, 12000, 8000) for i in range(3)]
+out = report.find_resummarized_outputs(recs, max_narrow_ratio=0.25)
+check(out == [], "ratio above threshold not flagged")
+
+# Below min_occurrences
+recs = [_output_rec(f"s{i}", "~/x", 50000, 12000, 100) for i in range(2)]
+out = report.find_resummarized_outputs(recs, min_occurrences=3)
+check(out == [], "below min_occurrences not flagged")
+
+# Zero next_out_tokens (no following turn) -> skipped
+recs = [_output_rec(f"s{i}", "~/x", 50000, 12000, 0) for i in range(5)]
+out = report.find_resummarized_outputs(recs)
+check(out == [], "zero next_out skipped")
+
+# Zero result_tokens_est -> skipped (would div by zero)
+recs = [_output_rec(f"s{i}", "~/x", 50000, 0, 100) for i in range(5)]
+out = report.find_resummarized_outputs(recs)
+check(out == [], "zero result_tokens skipped")
+
+# Prose records skipped
+recs = [{"_kind": "prose", "session": f"s{i}", "_input_target": "x", "_result_bytes": 50000,
+         "_result_tokens_est": 12000, "_next_turn_output_tokens": 100} for i in range(5)]
+out = report.find_resummarized_outputs(recs)
+check(out == [], "prose records skipped")
+
+# Aggregation: same target across 3 sessions
+recs = [_output_rec(f"s{i}", "~/big", 50000, 12000, 500) for i in range(3)]
+out = report.find_resummarized_outputs(recs, min_occurrences=3)
+check(out[0]["distinct_sessions"] == 3, "distinct_sessions counted across records")
+check(out[0]["sum_tokens"] == 36000, "sum_tokens aggregated")
+
+
+# =============================================================================
+# Phase 3: stability factor mapping
+# =============================================================================
+print("\n=== _stability_from_commit_count ===")
+check(report._stability_from_commit_count(0) == 1.0, "0 commits -> 1.0")
+check(report._stability_from_commit_count(1) == 0.8, "1 commit -> 0.8")
+check(report._stability_from_commit_count(3) == 0.8, "3 commits -> 0.8")
+check(report._stability_from_commit_count(4) == 0.5, "4 commits -> 0.5")
+check(report._stability_from_commit_count(10) == 0.5, "10 commits -> 0.5")
+check(report._stability_from_commit_count(11) == 0.25, "11 commits -> 0.25")
+check(report._stability_from_commit_count(30) == 0.25, "30 commits -> 0.25")
+check(report._stability_from_commit_count(31) == 0.1, "31 commits -> 0.1")
+check(report._stability_from_commit_count(999) == 0.1, "999 commits -> 0.1")
+
+
+# =============================================================================
+# Phase 3: mtime-based stability
+# =============================================================================
+print("\n=== _stability_from_mtime ===")
+import time as _t
+now = _t.time()
+check(report._stability_from_mtime(now - 3 * 86400) == 0.5, "3 days old -> 0.5")
+check(report._stability_from_mtime(now - 14 * 86400) == 0.7, "14 days old -> 0.7")
+check(report._stability_from_mtime(now - 60 * 86400) == 1.0, "60 days old -> 1.0")
+
+
+# =============================================================================
+# Phase 3: target path resolution
+# =============================================================================
+print("\n=== _resolve_target_path ===")
+home = os.path.expanduser("~")
+check(report._resolve_target_path("~/x.py") == home + "/x.py", "~ expansion")
+check(report._resolve_target_path("/etc/passwd") == "/etc/passwd", "absolute path passthrough")
+check(report._resolve_target_path("relative") is None, "relative -> None")
+check(report._resolve_target_path("") is None, "empty -> None")
+check(report._resolve_target_path(None) is None, "None -> None")
+check(report._resolve_target_path("https://x.com/") is None, "URL -> None")
+
+
+# =============================================================================
+# Phase 3: compute_stability_factor dispatch (no subprocess for these branches)
+# =============================================================================
+print("\n=== compute_stability_factor (kind dispatch) ===")
+check(report.compute_stability_factor("anything", "repeated_prose") == 1.0, "prose -> 1.0")
+check(report.compute_stability_factor("https://x.com/", "repeated_webfetch") == 0.7, "webfetch -> 0.7")
+check(report.compute_stability_factor("Read → Edit", "recipe_ngram") == 1.0, "recipe -> 1.0")
+check(report.compute_stability_factor("not-a-path", "repeated_read") == 0.7, "unresolvable target -> 0.7")
+check(report.compute_stability_factor("/nonexistent/file/here", "repeated_read") == 0.7, "missing file (no git result) -> 0.7")
+
+
+# =============================================================================
+# Phase 3: _git_commit_count with mocked subprocess
+# =============================================================================
+print("\n=== _git_commit_count (mocked) ===")
+report._git_commit_count.cache_clear()
+
+
+class _MockResult:
+    def __init__(self, returncode, stdout):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = ""
+
+
+with unittest.mock.patch.object(report.subprocess, "run") as mock_run:
+    mock_run.return_value = _MockResult(0, "abc def\nghi jkl\nmno pqr\n")
+    n = report._git_commit_count("/tmp/fake-test-path-1.txt")
+    check(n == 3, f"3 lines -> count 3 (got {n})")
+
+report._git_commit_count.cache_clear()
+with unittest.mock.patch.object(report.subprocess, "run") as mock_run:
+    mock_run.return_value = _MockResult(0, "")
+    n = report._git_commit_count("/tmp/fake-test-path-2.txt")
+    check(n == 0, "empty stdout -> count 0")
+
+report._git_commit_count.cache_clear()
+with unittest.mock.patch.object(report.subprocess, "run") as mock_run:
+    mock_run.return_value = _MockResult(128, "")  # not a git repo
+    n = report._git_commit_count("/tmp/fake-test-path-3.txt")
+    check(n is None, "non-zero returncode -> None")
+
+report._git_commit_count.cache_clear()
+with unittest.mock.patch.object(report.subprocess, "run") as mock_run:
+    import subprocess as _sub
+    mock_run.side_effect = _sub.TimeoutExpired("git", 2)
+    n = report._git_commit_count("/tmp/fake-test-path-4.txt")
+    check(n is None, "subprocess timeout -> None")
+
+report._git_commit_count.cache_clear()
+with unittest.mock.patch.object(report.subprocess, "run") as mock_run:
+    mock_run.side_effect = FileNotFoundError("git not installed")
+    n = report._git_commit_count("/tmp/fake-test-path-5.txt")
+    check(n is None, "git missing -> None")
+
+report._git_commit_count.cache_clear()
+n = report._git_commit_count("")
+check(n is None, "empty path -> None (no subprocess)")
+
+
+# =============================================================================
+# Phase 3: score_finding
+# =============================================================================
+print("\n=== score_finding ===")
+check(report.score_finding({"occurrences": 10, "avg_tokens": 100}, 1.0) == 1000, "stable -> full score")
+check(report.score_finding({"occurrences": 10, "avg_tokens": 100}, 0.1) == 100, "volatile -> 10x discount")
+check(report.score_finding({"occurrences": 10, "avg_tokens": 100}, 0.5) == 500, "mid -> half")
+check(report.score_finding({"occurrences": 0, "avg_tokens": 100}, 1.0) == 0, "zero occ -> 0")
+check(report.score_finding({}, 1.0) == 0, "empty finding -> 0")
+# Floor: stability < 0.1 clamps to 0.1 (defensive)
+check(report.score_finding({"occurrences": 10, "avg_tokens": 100}, 0.05) == 100, "below 0.1 floor")
+
+
+# =============================================================================
+# Phase 3: rank_findings (full pipeline w/ mocked git)
+# =============================================================================
+print("\n=== rank_findings ===")
+report._git_commit_count.cache_clear()
+findings = [
+    # Volatile: should drop to bottom
+    {"kind": "repeated_read", "target": "/tmp/volatile.py",
+     "occurrences": 100, "avg_tokens": 1000, "distinct_sessions": 5,
+     "sum_tokens": 100000, "sample_session_ids": [], "_raw": {}},
+    # Stable file: full credit
+    {"kind": "repeated_read", "target": "/tmp/stable.py",
+     "occurrences": 50, "avg_tokens": 1000, "distinct_sessions": 5,
+     "sum_tokens": 50000, "sample_session_ids": [], "_raw": {}},
+    # Recipe: always 1.0
+    {"kind": "recipe_ngram", "target": "Read -> Edit",
+     "occurrences": 60, "avg_tokens": 800, "distinct_sessions": 5,
+     "sum_tokens": 48000, "sample_session_ids": [], "_raw": {"n": 2}},
+]
+
+
+def _mock_run(cmd, **kwargs):
+    if "/tmp/volatile.py" in cmd:
+        return _MockResult(0, "\n".join("c" * 50) + "\n")  # 50 commits -> 0.1
+    if "/tmp/stable.py" in cmd:
+        return _MockResult(0, "")  # 0 commits -> 1.0
+    return _MockResult(128, "")
+
+
+with unittest.mock.patch.object(report.subprocess, "run", side_effect=_mock_run):
+    ranked = report.rank_findings(findings)
+
+# Annotations applied
+check(all("_stability_factor" in f for f in ranked), "all findings annotated with _stability_factor")
+check(all("_score" in f for f in ranked), "all findings annotated with _score")
+# Scores: stable=50000, volatile=10000, recipe=48000 -> stable > recipe > volatile
+check(ranked[0]["target"] == "/tmp/stable.py", f"stable file ranks #1 (got {ranked[0]['target']})")
+check(ranked[2]["target"] == "/tmp/volatile.py", f"volatile file ranks last (got {ranked[2]['target']})")
+check(ranked[0]["_stability_factor"] == 1.0, "stable factor 1.0")
+check(ranked[2]["_stability_factor"] == 0.1, "volatile factor 0.1")
+
+report._git_commit_count.cache_clear()
 
 
 # =============================================================================
