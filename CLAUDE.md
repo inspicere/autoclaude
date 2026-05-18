@@ -105,17 +105,19 @@ Two Forgejo Actions workflows run on push to `main` and on PRs:
 
 Both use `node:22-slim` image on the `docker` runner label. Product: `autoclaude`, Product Type: `Inspicere Projects`. The `DEFECTDOJO_API_TOKEN` secret is configured on the Forgejo repo. Scanner versions are pinned with SHA256 verification.
 
-## Known Issues (from 2026-05-16 project audit) — AUDIT ONLY, NO CODE CHANGES
+## Known Issues (from 2026-05-16 project audit) — 13/14 FINDINGS CLOSED (2026-05-18)
 
-A read-only 12-dimension `/project-audit` run on 2026-05-16 over the application + claude-code domain overlays. 1,006 tests confirmed passing. **0 Critical, 2 High, 11 Medium, 13 Low, 7 Info.** Overall risk posture: Moderate. No code changes. Findings tracked in DefectDojo engagement 123 (see Tracking section below).
+**Status (2026-05-18):** Remediated in five phased commits (`0db2431`, `256b6c6`, `dd4e326`, `76d155f`, `b19b5e8`). All 2 Highs and all 11 Mediums closed in DefectDojo engagement 123 / test 114 (reason=mitigated). Only the Low-severity rollup (#3275, Vikunja #540/#541 plus backlog) remains open. Commits are on `main` but not yet pushed to `origin/main`.
 
-### High (2) — OPEN
+A read-only 12-dimension `/project-audit` run on 2026-05-16 over the application + claude-code domain overlays. 1,006 tests confirmed passing. **0 Critical, 2 High, 11 Medium, 13 Low, 7 Info.** Overall risk posture: Moderate. Findings tracked in DefectDojo engagement 123 (see Tracking section below).
+
+### High (2) — CLOSED in `256b6c6`
 
 H1. **`docker run --mount type=bind,source=...` not detected** — `hooks/block-secrets.py:990-997`. Hook only checks `-v`/`--volume`; the `--mount source=...` syntax bypasses detection. Fix: parse comma-delimited `--mount` values and run `source=` through `_is_sensitive_path`. Add regression test paralleling `hooks/test_block_secrets.py:84`.
 
 H2. **`tar`/`zip` skip all `-`-prefixed args, missing `--file=` and bunched flags** — `hooks/block-secrets.py:983-988`. `tar -cT/path/...` and `tar --file=...` escape detection. Fix: extend `_FILE_FLAG_ARGS` with `tar`/`zip` entries for `-T`/`--files-from`/`--file=`, or treat `--*=PATH` long-flag values as candidate paths.
 
-### Medium (11) — OPEN
+### Medium (11) — CLOSED across `0db2431`, `dd4e326`, `76d155f`, `b19b5e8`
 
 - `_RE_SECRET_ASSIGN` value capture `(\S+)` stops at first whitespace (quoted values partially redacted)
 - Env-var truthy parsing is exact-match-to-"1" only (`HOOK_AUDIT=true` silently disables auditing)
