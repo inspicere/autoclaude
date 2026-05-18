@@ -18,7 +18,8 @@ jobs:
           apt-get update -qq && apt-get install -y -qq python3 curl >/dev/null 2>&1
 
       - name: Checkout
-        uses: actions/checkout@v4
+        # actions/checkout v4.2.2 pinned by SHA (resolved 2026-05-18).
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
 
       - name: Run test suites
         run: python3 scripts/ci-test-runner.py > test-findings.json

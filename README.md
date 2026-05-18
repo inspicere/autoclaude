@@ -62,6 +62,8 @@ python3 claude-approval-report.py --generate-settings
 
 See [docs/hooks.md](docs/hooks.md) for detection details, limitations, and configuration.
 
+> **Privacy note:** `HOOK_AUDIT=1` is the default. The PreToolUse hook writes a structured JSONL audit log to `~/.claude/hook-audit.jsonl` (mode 0600) capturing every Bash command (redacted), Read/Edit/Write path, and decision. Auto-rotates at 5 MB (one-backup model). Set `HOOK_AUDIT=0` to disable, or see [docs/hooks.md](docs/hooks.md#audit-log-data-surface-and-retention) for retention and redaction details.
+
 ### Landlock kernel sandbox (prototype)
 
 The static-analysis hooks can't catch runtime indirection: shell function calls (`r() { cat "$1"; }; r .env`), bash array expansion, or interpreter path construction. The Landlock sandbox solves this at the kernel level — it restricts `open()` syscalls regardless of how the path was derived.
