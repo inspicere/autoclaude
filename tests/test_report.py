@@ -1278,6 +1278,22 @@ check("most-recent" in _r.stdout,
 
 
 # =============================================================================
+# #541 (2026-05-18): --version flag sourced from pyproject.toml
+# =============================================================================
+print("\n=== --version flag ===")
+_r = _sp.run([sys.executable, _script, "--version"],
+             capture_output=True, text=True, timeout=10)
+check(_r.returncode == 0, "--version exits 0")
+check(_r.stdout.startswith("autoclaude "),
+      f"--version prints 'autoclaude <version>' (got {_r.stdout!r})")
+check(report.__version__ != "unknown",
+      f"__version__ resolved from pyproject.toml (got {report.__version__!r})")
+import re as _re
+check(_re.match(r'^\d+\.\d+\.\d+', report.__version__) is not None,
+      f"__version__ looks like semver (got {report.__version__!r})")
+
+
+# =============================================================================
 # SUMMARY
 # =============================================================================
 print("\n" + "=" * 70)
