@@ -2745,9 +2745,15 @@ def render_warns(all_records, since=None, out=None):
         print("No hook warnings found.", file=out)
         return
 
-    # Build lookup of session commands by approximate timestamp + command text
-    # Session records have "timestamp" and tool_input.command
+    # Build lookup of session commands by approximate timestamp + command text.
+    # Two indexes:
+    #   session_cmds: exact (ts_prefix, cmd[:200]) -> rec for the fast path
+    #   session_cmds_by_prefix: cmd[:64] -> [rec, ...] for substring fallback
+    # The prefix index avoids the historical O(W × R) linear scan when the
+    # warn's command shares a leading prefix with a session record (the common
+    # case — both come from the same hook invocation).
     session_cmds = {}
+    session_cmds_by_prefix = defaultdict(list)
     for r in all_records:
         if r["tool_name"] != "Bash":
             continue
@@ -2755,6 +2761,7 @@ def render_warns(all_records, since=None, out=None):
         ts = r.get("timestamp", "")
         if cmd and ts:
             session_cmds[(ts[:16], cmd[:200])] = r
+            session_cmds_by_prefix[cmd[:64]].append(r)
 
     print(f"\n{'='*78}", file=out)
     print(f"  Hook Warnings — {len(warns)} event(s)", file=out)
@@ -2777,13 +2784,21 @@ def render_warns(all_records, since=None, out=None):
             ts_prefix = ""
 
         cmd_short = cmd[:200] if cmd else ""
-        # Try exact match, then fuzzy by command text
+        # Try exact match first, then prefix-indexed substring, then full scan.
         matched_rec = session_cmds.get((ts_prefix, cmd_short))
-        if not matched_rec:
-            for key, rec in session_cmds.items():
-                if cmd_short and cmd_short in key[1]:
+        if not matched_rec and cmd_short:
+            for rec in session_cmds_by_prefix.get(cmd_short[:64], []):
+                rec_cmd = rec.get("full_command", "")[:200]
+                if cmd_short in rec_cmd:
                     matched_rec = rec
                     break
+            if not matched_rec:
+                # Final fallback: linear scan for substring matches that don't
+                # share a leading prefix (rare; preserved for behavioral parity).
+                for key, rec in session_cmds.items():
+                    if cmd_short in key[1]:
+                        matched_rec = rec
+                        break
 
         if matched_rec:
             if matched_rec.get("rejected"):
@@ -3287,6 +3302,16 @@ def main():
         help="With --token-report(-json): a repeated-read finding requires "
              "at least N total tokens across all reads (default 5000).",
     )
+    parser.add_argument(
+        "--max-records",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Cap the in-memory record list at N most-recent records. "
+             "Memory usage grows linearly with tool-call history; use this "
+             "for very large session corpora. Token-report aggregation "
+             "(cross-session recipes/prose) will see a reduced sample.",
+    )
     args = parser.parse_args()
 
     trend_window = args.trend if args.trend is not None else None
@@ -3348,6 +3373,16 @@ def main():
     if collect_prose and args.project:
         all_prose = [p for p in all_prose if p.get("project") == args.project
                      or short_project_name(p.get("project", "")) == args.project]
+
+    if args.max_records is not None and args.max_records > 0:
+        if len(all_records) > args.max_records:
+            # Keep the most-recent N records (last in chronological order).
+            all_records.sort(key=lambda r: _parse_ts(r.get("timestamp", ""))
+                             or datetime.min.replace(tzinfo=timezone.utc))
+            dropped = len(all_records) - args.max_records
+            all_records = all_records[-args.max_records:]
+            print(f"--max-records: kept {args.max_records} most-recent, "
+                  f"dropped {dropped} older records.", file=sys.stderr)
 
     if (not all_records
         and not args.generate_settings
