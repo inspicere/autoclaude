@@ -378,12 +378,52 @@ def classify_risk(tool_name, tool_input):
 
 # --- Allowlist pattern matching ---
 
-def load_global_settings():
-    path = CLAUDE_DIR / "settings.json"
-    if path.exists():
+def _safe_load_settings(path):
+    """Load and shape-validate a Claude Code settings JSON file.
+
+    Returns a dict (possibly empty). On any failure or unexpected shape,
+    emits a single Warning to stderr and returns {}. Validates:
+      - root is a JSON object
+      - permissions is absent or an object
+      - permissions.allow / permissions.deny are absent or lists
+    Repairs partially-bad shapes by zeroing out the offending sub-field.
+    """
+    path = Path(path) if not isinstance(path, Path) else path
+    if not path.exists():
+        return {}
+    try:
         with open(path) as f:
-            return json.load(f)
-    return {}
+            data = json.load(f)
+    except json.JSONDecodeError as e:
+        print(f"Warning: invalid JSON in {path}: {e}", file=sys.stderr)
+        return {}
+    except OSError as e:
+        print(f"Warning: cannot read {path}: {e}", file=sys.stderr)
+        return {}
+    if not isinstance(data, dict):
+        print(f"Warning: {path} is not a JSON object (got {type(data).__name__})",
+              file=sys.stderr)
+        return {}
+    perms = data.get("permissions")
+    if perms is None:
+        return data
+    if not isinstance(perms, dict):
+        print(f"Warning: {path} 'permissions' is not an object (got {type(perms).__name__}); ignoring",
+              file=sys.stderr)
+        data["permissions"] = {}
+        return data
+    for key in ("allow", "deny"):
+        v = perms.get(key)
+        if v is not None and not isinstance(v, list):
+            print(f"Warning: {path} 'permissions.{key}' is not a list (got {type(v).__name__}); ignoring",
+                  file=sys.stderr)
+            perms[key] = []
+    return data
+
+
+def load_global_settings():
+    return _safe_load_settings(CLAUDE_DIR / "settings.json")
+
 
 def load_project_settings(project_name):
     """Load settings.local.json from project source directories and from ~/.claude/projects/."""
@@ -391,23 +431,13 @@ def load_project_settings(project_name):
 
     # Check ~/.claude/projects/<project>/settings.json
     proj_settings = PROJECTS_DIR / project_name / "settings.json"
-    if proj_settings.exists():
-        try:
-            with open(proj_settings) as f:
-                data = json.load(f)
-            patterns.extend(data.get("permissions", {}).get("allow", []))
-        except (json.JSONDecodeError, KeyError):
-            pass
+    data = _safe_load_settings(proj_settings)
+    patterns.extend(data.get("permissions", {}).get("allow", []))
 
     settings_path = project_settings_path(project_name)
-    settings_local = settings_path if settings_path else Path("/nonexistent")
-    if settings_local.exists():
-        try:
-            with open(settings_local) as f:
-                data = json.load(f)
-            patterns.extend(data.get("permissions", {}).get("allow", []))
-        except (json.JSONDecodeError, KeyError):
-            pass
+    if settings_path:
+        data = _safe_load_settings(settings_path)
+        patterns.extend(data.get("permissions", {}).get("allow", []))
 
     return patterns
 
@@ -2004,14 +2034,11 @@ def _write_settings(path, settings, dry_run):
 
 
 def _load_settings(path):
-    """Load JSON settings from path, returning empty dict on missing/invalid."""
-    if path.exists():
-        try:
-            with open(path) as f:
-                return json.load(f)
-        except (json.JSONDecodeError, OSError):
-            pass
-    return {}
+    """Load JSON settings from path, returning empty dict on missing/invalid.
+
+    Thin wrapper around _safe_load_settings (kept for callers that pass a Path).
+    """
+    return _safe_load_settings(path)
 
 
 def apply_suggestions(all_records, risk_level="read-only", dry_run=False, scope="project", quiet=False, min_approvals=3):
