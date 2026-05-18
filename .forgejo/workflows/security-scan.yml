@@ -9,7 +9,9 @@ jobs:
   security:
     runs-on: docker
     container:
-      image: node:22-slim
+      # node:22-slim pinned by digest. Resolved 2026-05-17 via `docker pull`.
+      # Refresh quarterly; tag-pinning leaves CI exposed to upstream re-pointing.
+      image: node:22-slim@sha256:689c11043dad91472750cd824c97dd5e2318e9dd6f954e492fe7af0135d33ceb
 
     env:
       GITLEAKS_VERSION: "8.24.3"
