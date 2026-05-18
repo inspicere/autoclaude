@@ -85,7 +85,7 @@ _RE_JWT = re.compile(
 )
 
 _RE_PRIVATE_KEY = re.compile(
-    r'-----BEGIN[ A-Z0-9_-]{0,100}PRIVATE KEY(?:\s+BLOCK)?-----'
+    r'-----BEGIN (?:(?:RSA|DSA|EC|OPENSSH|PGP|ENCRYPTED) )?PRIVATE KEY(?:\s+BLOCK)?-----'
 )
 
 _RE_CURL_AUTH = re.compile(
@@ -458,6 +458,24 @@ def load_project_settings(project_name):
     return patterns
 
 
+def _canonicalize_pattern(pattern):
+    """Normalize semantically equivalent Claude Code permission patterns.
+
+    Currently collapses `Bash(git add:*)` and `Bash(git add *)` to the same
+    canonical form (space-delimited), so apply_suggestions doesn't append a
+    new pattern when an equivalent one is already present.
+    """
+    if not isinstance(pattern, str):
+        return pattern
+    m = re.match(r'^(Bash)\((.+)\)$', pattern)
+    if m:
+        inner = m.group(2).replace(":", " ")
+        # Collapse runs of whitespace produced by the colon swap
+        inner = re.sub(r'\s+', ' ', inner).strip()
+        return f"Bash({inner})"
+    return pattern
+
+
 def parse_permission_pattern(pattern):
     """Parse a Claude Code permission pattern into (tool_name, arg_pattern)."""
     # Patterns like: Bash(git add:*), Bash(git add *), Read(**/.env.example),
@@ -619,7 +637,27 @@ def get_tool_full_command(tool_name, tool_input):
     return ""
 
 
-_MAX_SESSION_SIZE = 100 * 1024 * 1024  # 100 MB
+def _resolve_max_session_size():
+    """Resolve per-file JSONL cap from AUTOCLAUDE_MAX_SESSION_MB env var.
+
+    Accepts an integer number of megabytes. Falls back to 100 MB if unset
+    or invalid. Capping at 0 or negative disables the limit (sets to sys.maxsize).
+    """
+    raw = os.environ.get("AUTOCLAUDE_MAX_SESSION_MB", "").strip()
+    if not raw:
+        return 100 * 1024 * 1024
+    try:
+        mb = int(raw)
+    except ValueError:
+        print(f"Warning: AUTOCLAUDE_MAX_SESSION_MB={raw!r} is not an integer; "
+              f"falling back to 100 MB", file=sys.stderr)
+        return 100 * 1024 * 1024
+    if mb <= 0:
+        return sys.maxsize
+    return mb * 1024 * 1024
+
+
+_MAX_SESSION_SIZE = _resolve_max_session_size()
 
 
 # --- Token-attribution helpers (Phase 1 of token-report mode) ---
@@ -873,11 +911,17 @@ def process_session(jsonl_path, allow_patterns, project_name):
         return records
 
     objects = []
+    dropped = 0
     for line in lines:
         try:
             objects.append(json.loads(line))
         except json.JSONDecodeError:
+            dropped += 1
             continue
+    if dropped:
+        print(f"  Warning: {os.path.basename(jsonl_path)} had "
+              f"{dropped} malformed line(s); dropped from analysis",
+              file=sys.stderr)
 
     assistant_by_uuid = {}
     assistant_order = []  # chronological list of assistant uuids
@@ -2083,9 +2127,11 @@ def apply_suggestions(all_records, risk_level="read-only", dry_run=False, scope=
     if global_patterns:
         global_path = CLAUDE_DIR / "settings.json"
         global_settings = _load_settings(global_path)
-        existing_global = set(global_settings.get("permissions", {}).get("allow", []))
+        existing_raw = global_settings.get("permissions", {}).get("allow", [])
+        existing_canon = {_canonicalize_pattern(p) for p in existing_raw}
 
-        new_global = sorted(global_patterns - existing_global)
+        new_global = sorted(p for p in global_patterns
+                            if _canonicalize_pattern(p) not in existing_canon)
         if new_global:
             project_count = {p: len(pattern_projects[p]) for p in new_global}
             _log(f"\n  GLOBAL: {global_path}")
@@ -2110,13 +2156,14 @@ def apply_suggestions(all_records, risk_level="read-only", dry_run=False, scope=
                 continue
 
             settings = _load_settings(settings_path)
-            existing = set(settings.get("permissions", {}).get("allow", []))
+            existing_raw = settings.get("permissions", {}).get("allow", [])
+            existing_canon = {_canonicalize_pattern(p) for p in existing_raw}
 
             new_patterns = []
             for pattern, count, risk in patterns:
                 if scope == "both" and pattern in global_patterns:
                     continue
-                if pattern not in existing:
+                if _canonicalize_pattern(pattern) not in existing_canon:
                     new_patterns.append((pattern, count, risk))
 
             if not new_patterns:
@@ -3333,6 +3380,13 @@ def main():
              "for very large session corpora. Token-report aggregation "
              "(cross-session recipes/prose) will see a reduced sample.",
     )
+    parser.add_argument(
+        "-q", "--quiet",
+        action="store_true",
+        default=False,
+        help="Suppress progress messages on stderr ('Scanning...', 'Filters:...'). "
+             "Warning/Error messages still surface.",
+    )
     args = parser.parse_args()
 
     trend_window = args.trend if args.trend is not None else None
@@ -3348,7 +3402,8 @@ def main():
 
     since = parse_time_filter(args.since) if args.since else None
 
-    print("Scanning Claude Code session data...", file=sys.stderr)
+    if not args.quiet:
+        print("Scanning Claude Code session data...", file=sys.stderr)
 
     global_settings = load_global_settings()
     global_allow = global_settings.get("permissions", {}).get("allow", [])
@@ -3421,7 +3476,7 @@ def main():
         active_filters.append(f"project={args.project}")
     if args.session:
         active_filters.append(f"session={args.session}")
-    if active_filters:
+    if active_filters and not args.quiet:
         print(f"Filters: {', '.join(active_filters)}", file=sys.stderr)
 
     if args.generate_settings:

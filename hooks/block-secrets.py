@@ -153,7 +153,7 @@ _RE_JWT = re.compile(
 )
 
 _RE_PRIVATE_KEY = re.compile(
-    r'-----BEGIN[ A-Z0-9_-]{0,100}PRIVATE KEY(?:\s+BLOCK)?-----'
+    r'-----BEGIN (?:(?:RSA|DSA|EC|OPENSSH|PGP|ENCRYPTED) )?PRIVATE KEY(?:\s+BLOCK)?-----'
 )
 
 _RE_CURL_AUTH = re.compile(
@@ -548,16 +548,23 @@ def _unwrap_grouping(command):
     return None
 
 
-def _split_shell_commands(command):
+_MAX_UNWRAP_DEPTH = 8
+
+
+def _split_shell_commands(command, _depth=0):
     """Split a shell command on ;, &&, ||, | respecting quotes.
 
     Also unwraps outer ( ) subshells and { } brace groups so that
     (cat file) and { cat file; } are not treated as atomic opaque tokens.
+    `_depth` bounds nested-grouping recursion to _MAX_UNWRAP_DEPTH; pathological
+    inputs like ((((cat .env)))) abort cleanly rather than hitting Python's
+    recursion limit.
     """
     # Unwrap outer grouping so (cat .env) and { cat .env; } are traversed
-    unwrapped = _unwrap_grouping(command)
-    if unwrapped is not None:
-        return _split_shell_commands(unwrapped)
+    if _depth < _MAX_UNWRAP_DEPTH:
+        unwrapped = _unwrap_grouping(command)
+        if unwrapped is not None:
+            return _split_shell_commands(unwrapped, _depth + 1)
 
     commands = []
     current = []

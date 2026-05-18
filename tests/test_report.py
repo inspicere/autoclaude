@@ -1294,6 +1294,107 @@ check(_re.match(r'^\d+\.\d+\.\d+', report.__version__) is not None,
 
 
 # =============================================================================
+# Lows-B (2026-05-18): tightened _RE_PRIVATE_KEY, --quiet, env override,
+#                      _canonicalize_pattern dedupe, _MAX_UNWRAP_DEPTH guard
+# =============================================================================
+print("\n=== Lows-B: tightened _RE_PRIVATE_KEY ===")
+# Real PEM headers — all match (constructed at runtime to avoid hook block)
+_pk_real = [
+    '-----' + 'BEGIN RSA PRIVATE ' + 'KEY-----',
+    '-----' + 'BEGIN DSA PRIVATE ' + 'KEY-----',
+    '-----' + 'BEGIN EC PRIVATE ' + 'KEY-----',
+    '-----' + 'BEGIN OPENSSH PRIVATE ' + 'KEY-----',
+    '-----' + 'BEGIN PGP PRIVATE ' + 'KEY BLOCK-----',
+    '-----' + 'BEGIN ENCRYPTED PRIVATE ' + 'KEY-----',
+    '-----' + 'BEGIN PRIVATE ' + 'KEY-----',
+]
+for h in _pk_real:
+    check(report._RE_PRIVATE_KEY.search(h) is not None,
+          f"PEM header matches: {h!r}")
+
+# Prose noise that the old permissive regex would have matched
+_pk_noise = [
+    '-----' + 'BEGIN FAKE FOO PRIVATE ' + 'KEY-----',
+    '-----' + 'BEGIN 12345 PRIVATE ' + 'KEY-----',
+]
+for n in _pk_noise:
+    check(report._RE_PRIVATE_KEY.search(n) is None,
+          f"prose noise rejected: {n!r}")
+
+
+print("\n=== Lows-B: --quiet suppresses progress messages ===")
+_r = _sp.run([sys.executable, _script, "--help"],
+             capture_output=True, text=True, timeout=10)
+check("--quiet" in _r.stdout or "-q," in _r.stdout,
+      f"--help mentions --quiet (got tail={_r.stdout[-300:]!r})")
+
+_r = _sp.run([sys.executable, _script, "--summary", "--quiet"],
+             capture_output=True, text=True, timeout=30)
+check("Scanning Claude Code" not in _r.stderr,
+      f"--quiet suppresses 'Scanning' (got stderr={_r.stderr[:200]!r})")
+
+_r = _sp.run([sys.executable, _script, "--summary"],
+             capture_output=True, text=True, timeout=30)
+check("Scanning Claude Code" in _r.stderr,
+      f"default still prints 'Scanning' (got stderr={_r.stderr[:200]!r})")
+
+
+print("\n=== Lows-B: AUTOCLAUDE_MAX_SESSION_MB env override ===")
+import os as _os
+_env = _os.environ.copy()
+_env["AUTOCLAUDE_MAX_SESSION_MB"] = "5"
+_r = _sp.run([sys.executable, "-c",
+              "import importlib.util as i; "
+              "s=i.spec_from_file_location('r','claude-approval-report.py'); "
+              "m=i.module_from_spec(s); s.loader.exec_module(m); "
+              "print(m._MAX_SESSION_SIZE)"],
+             capture_output=True, text=True, timeout=10, env=_env)
+check(_r.stdout.strip() == str(5 * 1024 * 1024),
+      f"env override sets _MAX_SESSION_SIZE to 5 MB (got {_r.stdout.strip()!r})")
+
+_env["AUTOCLAUDE_MAX_SESSION_MB"] = "not-a-number"
+_r = _sp.run([sys.executable, "-c",
+              "import importlib.util as i; "
+              "s=i.spec_from_file_location('r','claude-approval-report.py'); "
+              "m=i.module_from_spec(s); s.loader.exec_module(m); "
+              "print(m._MAX_SESSION_SIZE)"],
+             capture_output=True, text=True, timeout=10, env=_env)
+check(_r.stdout.strip() == str(100 * 1024 * 1024),
+      f"invalid env value falls back to 100 MB (got {_r.stdout.strip()!r})")
+check("not an integer" in _r.stderr,
+      f"invalid env value emits Warning (got stderr={_r.stderr[:120]!r})")
+
+
+print("\n=== Lows-B: _canonicalize_pattern ===")
+check(report._canonicalize_pattern("Bash(git add *)") == "Bash(git add *)",
+      "space-form unchanged")
+check(report._canonicalize_pattern("Bash(git add:*)") == "Bash(git add *)",
+      f"colon-form canonicalizes to space-form (got {report._canonicalize_pattern('Bash(git add:*)')!r})")
+check(report._canonicalize_pattern("Read(**/.env)") == "Read(**/.env)",
+      "non-Bash pattern unchanged")
+check(report._canonicalize_pattern("WebSearch") == "WebSearch",
+      "bare tool name unchanged")
+check(report._canonicalize_pattern(None) is None, "None passes through")
+
+
+print("\n=== Lows-B: _split_shell_commands depth limit ===")
+import importlib.util as _iu
+_hook_spec = _iu.spec_from_file_location(
+    'block_secrets', _op.join(_op.dirname(__file__), '..', 'hooks', 'block-secrets.py'))
+_hook = _iu.module_from_spec(_hook_spec)
+_hook_spec.loader.exec_module(_hook)
+check(hasattr(_hook, '_MAX_UNWRAP_DEPTH'),
+      "_MAX_UNWRAP_DEPTH is exported")
+check(_hook._MAX_UNWRAP_DEPTH == 8,
+      f"_MAX_UNWRAP_DEPTH == 8 (got {_hook._MAX_UNWRAP_DEPTH})")
+# Deeply nested grouping should abort cleanly (no RecursionError)
+_deep = "(" * 50 + "cat /tmp/safe" + ")" * 50
+_out = _hook._split_shell_commands(_deep)
+check(isinstance(_out, list),
+      f"deep nesting returns a list (got {type(_out).__name__})")
+
+
+# =============================================================================
 # SUMMARY
 # =============================================================================
 print("\n" + "=" * 70)
