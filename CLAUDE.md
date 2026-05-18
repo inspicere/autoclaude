@@ -30,7 +30,7 @@ python3 claude-approval-report.py --token-report-json --token-top 10  # JSON, to
 python3 claude-approval-report.py -o           # write to auto-named timestamped file
 ```
 
-No dependencies beyond Python 3.11+ stdlib. Test suites: `tests/test_report.py` (372 tests for the main script's pure functions), `hooks/test_block_secrets.py` (67 tests), `hooks/test_bypass_fixes.py` (110 tests), `hooks/test_round2_bypass_fixes.py` (50 tests), `hooks/test_round3_bypass_fixes.py` (82 tests), `hooks/test_analysis_fixes.py` (68 tests), `hooks/test_fp_fixes.py` (28 tests), `hooks/test_infra_usability.py` (139 tests), `hooks/test_warn_secrets.py` (15 tests), `hooks/test_warn_mode.py` (30 tests), `hooks/test_warn_output_adversarial.py` (48 tests), `hooks/test_phase1_audit_fixes.py` (31 tests), `hooks/test_round4_bypass_fixes.py` (26 tests), `hooks/test_phase3_audit_fixes.py` (20 tests), `scripts/check-pattern-sync.py` (10 checks) — 1096 total.
+No dependencies beyond Python 3.11+ stdlib. Test suites: `tests/test_report.py` (395 tests for the main script's pure functions), `hooks/test_block_secrets.py` (67 tests), `hooks/test_bypass_fixes.py` (110 tests), `hooks/test_round2_bypass_fixes.py` (50 tests), `hooks/test_round3_bypass_fixes.py` (82 tests), `hooks/test_analysis_fixes.py` (68 tests), `hooks/test_fp_fixes.py` (28 tests), `hooks/test_infra_usability.py` (139 tests), `hooks/test_warn_secrets.py` (15 tests), `hooks/test_warn_mode.py` (30 tests), `hooks/test_warn_output_adversarial.py` (48 tests), `hooks/test_phase1_audit_fixes.py` (31 tests), `hooks/test_round4_bypass_fixes.py` (26 tests), `hooks/test_phase3_audit_fixes.py` (20 tests), `scripts/check-pattern-sync.py` (10 checks) — 1119 total.
 
 ## Architecture
 
@@ -99,7 +99,7 @@ Reference these docs when adding new secret patterns or modifying detection logi
 
 Two Forgejo Actions workflows run on push to `main` and on PRs:
 
-1. **`test.yml`** — runs all 15 test suites (1096 tests). Results uploaded to DefectDojo as "Generic Findings Import" under engagement "CI Tests". Clean runs auto-close previous findings via `close_old_findings=true`.
+1. **`test.yml`** — runs all 15 test suites (1119 tests). Results uploaded to DefectDojo as "Generic Findings Import" under engagement "CI Tests". Clean runs auto-close previous findings via `close_old_findings=true`.
 
 2. **`security-scan.yml`** — runs gitleaks (secret detection), semgrep (Python SAST), and trivy (filesystem vuln scan). Each scanner's native JSON output is uploaded to DefectDojo under engagement "Security Scans" using the scanner-specific import type. Gitleaks failures block the build; semgrep/trivy are informational. Test files are allowlisted in `.gitleaks.toml` to avoid false positives on intentional test fixture patterns.
 

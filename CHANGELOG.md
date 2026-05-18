@@ -11,11 +11,19 @@ incompatibilities are possible between any two snapshots.
 
 ### Added
 - `--version` flag on `claude-approval-report.py` prints `autoclaude <version>` sourced from `pyproject.toml`.
+- `-q` / `--quiet` flag suppresses "Scanning..." and "Filters: ..." progress messages on stderr. Warnings/errors still surface.
+- `AUTOCLAUDE_MAX_SESSION_MB` env var overrides the per-file 100 MB JSONL ingest cap (set to 0 to disable).
+- `_canonicalize_pattern()` helper collapses semantically equivalent `Bash(...)` patterns (`Bash(git add:*)` ≡ `Bash(git add *)`) so `--apply` doesn't duplicate entries.
+- Drop-count surfaced when `process_session` skips malformed JSONL lines (previously silent).
 - `CHANGELOG.md` (this file). Closes Vikunja #541.
-- `docs/history/` archive directory holding the verbatim text of resolved audit / red-team engagements: `audit-2026-05-07.md`, `red-team-2026-05-08.md`, `red-team-2026-05-10.md`, `audit-2026-05-16.md`.
+- `docs/history/` archive directory holding the verbatim text of resolved audit / red-team engagements: `audit-2026-05-07.md`, `red-team-2026-05-08.md`, `red-team-2026-05-10.md`, `audit-2026-05-16.md`, `token-report-plan-2026-05-15.md`.
+- README "Privacy note" callout documenting that `HOOK_AUDIT=1` is the default and what gets captured.
 
 ### Changed
 - `CLAUDE.md` trimmed from 272 to 119 lines by relocating the resolved-issue history into `docs/history/`. Loaded into every Claude session, so the saving compounds. Closes Vikunja #540. (`28e9711`)
+- `_RE_PRIVATE_KEY` tightened from `[ A-Z0-9_-]{0,100}` to a closed set of real PEM header keywords (`RSA`, `DSA`, `EC`, `OPENSSH`, `PGP`, `ENCRYPTED`, plus PKCS#8 bare form). Same change in both the report script and the hook; verified by `check-pattern-sync.py`.
+- `_split_shell_commands` recursion through `_unwrap_grouping` now bounded by `_MAX_UNWRAP_DEPTH = 8`. Pathological inputs like `((((cat .env))))` abort cleanly instead of risking the interpreter recursion limit.
+- CI workflows pin `actions/checkout` by SHA (`11bd71901bbe5b1630ceea73d27597364c9af683`, v4.2.2 resolved 2026-05-18). semgrep install carries an inline comment documenting the accepted residual risk of unverified-hash pip install.
 
 ## [0.1.0] — 2026-05-18
 
