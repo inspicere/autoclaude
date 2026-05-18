@@ -110,13 +110,17 @@ Claude Code stores session transcripts as JSONL under `~/.claude/projects/`. Thi
 6. Groups by normalized command prefix for aggregation
 7. Renders the selected output mode
 
+### Memory profile
+
+Records are aggregated in memory across all sessions to support cross-session detectors (token-report, trend, suggestion ranking). Per-file ingest caps at 100 MB (`_MAX_SESSION_SIZE`); the aggregate footprint is roughly one small dict per tool call. Validated to ~39K records / ~10 projects without issue. For very large corpora, `--max-records N` keeps the N most-recent records and drops the rest before rendering.
+
 ## Red team results
 
 Three rounds of multi-agent adversarial testing (8 parallel agents per round, mixed Opus/Sonnet) found 33 bypass vectors — all remediated. The hooks grew from ~500 to ~1450 lines. 15 remaining gaps are either unfixable by static analysis (solved by Landlock) or architectural (MCP passthrough).
 
 ## CI/CD
 
-Forgejo Actions runs 1087 tests across 15 suites on every push. Failures are reported to DefectDojo. See `.forgejo/workflows/test.yml`.
+Forgejo Actions runs 1092 tests across 15 suites on every push. Failures are reported to DefectDojo. See `.forgejo/workflows/test.yml`.
 
 ## Docs
 

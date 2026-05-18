@@ -1196,6 +1196,88 @@ check(scores == sorted(scores, reverse=True), "scores descending")
 
 
 # =============================================================================
+# M6 (2026-05-16 audit Phase 5): render_warns prefix index correctness
+# =============================================================================
+print("\n=== M6: render_warns prefix index (correctness) ===")
+import tempfile as _tempfile
+import os as _os
+from unittest.mock import patch as _patch
+
+home_slug2 = report.HOME_SLUG
+
+# Build session records that share a common 64-char prefix
+common_prefix = "git log --oneline --all --decorate=full --graph "
+sess_records = [
+    {
+        "tool_name": "Bash",
+        "tool_input": {"command": common_prefix + " --since=2026-01-01 --until=2026-12-31"},
+        "full_command": common_prefix + " --since=2026-01-01 --until=2026-12-31",
+        "rejected": False,
+        "auto_allowed": False,
+        "timestamp": "2026-05-15T10:00:00+00:00",
+        "project": f"{home_slug2}-test",
+        "display": "Bash: git log",
+        "risk": "read-only",
+    },
+    {
+        "tool_name": "Bash",
+        "tool_input": {"command": common_prefix + " --since=2026-02-01"},
+        "full_command": common_prefix + " --since=2026-02-01",
+        "rejected": True,
+        "auto_allowed": False,
+        "timestamp": "2026-05-15T11:00:00+00:00",
+        "project": f"{home_slug2}-test",
+        "display": "Bash: git log",
+        "risk": "read-only",
+    },
+]
+
+# Synthetic audit log: one warn entry whose command shares the prefix
+with _tempfile.TemporaryDirectory() as _td:
+    audit_dir = _os.path.join(_td, ".claude")
+    _os.makedirs(audit_dir)
+    audit_path = _os.path.join(audit_dir, "hook-audit.jsonl")
+    with open(audit_path, "w") as _f:
+        warn_record = {
+            "ts": "2026-05-15T10:00:30+00:00",
+            "decision": "warn",
+            "tool": "Bash",
+            "command": common_prefix + " --since=2026-01-01 --until=2026-12-31",
+            "reason": "test warn",
+        }
+        _f.write(_json.dumps(warn_record) + "\n")
+
+    # Point CLAUDE_DIR at the temp audit log
+    with _patch.object(report, "CLAUDE_DIR", report.Path(_td) / ".claude"):
+        buf = io.StringIO()
+        report.render_warns(sess_records, out=buf)
+        out_text = buf.getvalue()
+
+check("Hook Warnings — 1 event" in out_text,
+      f"warn count rendered (got {out_text[:80]!r})")
+check("APPROVED" in out_text,
+      f"warn matched to approved session record via prefix index "
+      f"(got {out_text[:200]!r})")
+
+
+# =============================================================================
+# M5 (2026-05-16 audit Phase 5): --max-records flag presence
+# =============================================================================
+print("\n=== M5: --max-records argparse flag ===")
+import subprocess as _sp
+import os.path as _op
+
+_script = _op.join(_op.dirname(__file__), "..", "claude-approval-report.py")
+_r = _sp.run([sys.executable, _script, "--help"],
+             capture_output=True, text=True, timeout=10)
+check(_r.returncode == 0, "--help exits 0")
+check("--max-records" in _r.stdout,
+      f"--help mentions --max-records (got tail={_r.stdout[-200:]!r})")
+check("most-recent" in _r.stdout,
+      "--max-records help text describes behavior")
+
+
+# =============================================================================
 # SUMMARY
 # =============================================================================
 print("\n" + "=" * 70)
