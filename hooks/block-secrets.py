@@ -20,6 +20,7 @@ import sys
 if sys.version_info < (3, 11):
     sys.exit("Error: Python 3.11+ required. Found " + ".".join(map(str, sys.version_info[:3])))
 
+import fcntl
 import json
 import math
 import os
@@ -30,6 +31,8 @@ _TRUTHY = frozenset({"1", "true", "yes", "on"})
 _DEBUG = os.environ.get("HOOK_DEBUG", "").lower() in _TRUTHY
 _AUDIT = os.environ.get("HOOK_AUDIT", "1").lower() in _TRUTHY
 _AUDIT_LOG = os.path.join(os.path.expanduser("~"), ".claude", "hook-audit.jsonl")
+_AUDIT_LOCK = _AUDIT_LOG + ".lock"
+_AUDIT_ROTATE_THRESHOLD = 5_000_000
 
 
 def _debug(msg):
@@ -69,11 +72,7 @@ def _audit_log(decision, tool_name, summary="", reason="", command="",
     if confidence:
         record["confidence"] = confidence
     try:
-        try:
-            if os.path.getsize(_AUDIT_LOG) > 5_000_000:
-                os.replace(_AUDIT_LOG, _AUDIT_LOG + ".1")
-        except OSError:
-            pass
+        _maybe_rotate_audit_log()
         line = json.dumps(record, separators=(",", ":")) + "\n"
         fd = os.open(_AUDIT_LOG, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
         try:
@@ -82,6 +81,42 @@ def _audit_log(decision, tool_name, summary="", reason="", command="",
             os.close(fd)
     except OSError:
         pass
+
+
+def _maybe_rotate_audit_log():
+    """Rotate audit log to .1 when over threshold; race-safe under parallel hooks.
+
+    Uses fcntl.flock on a sidecar lock file to serialize rotation across
+    concurrent hook processes. Re-checks size inside the lock so the loser
+    of the race no-ops. Single-backup model: current .jsonl.1 is overwritten.
+    """
+    try:
+        if os.path.getsize(_AUDIT_LOG) <= _AUDIT_ROTATE_THRESHOLD:
+            return
+    except OSError:
+        return
+    try:
+        lock_fd = os.open(_AUDIT_LOCK,
+                          os.O_WRONLY | os.O_CREAT, 0o600)
+    except OSError:
+        return
+    try:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return  # another process is rotating right now
+        try:
+            if os.path.getsize(_AUDIT_LOG) > _AUDIT_ROTATE_THRESHOLD:
+                os.replace(_AUDIT_LOG, _AUDIT_LOG + ".1")
+        except OSError:
+            pass
+        finally:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+    finally:
+        os.close(lock_fd)
 
 
 # --- Token patterns (same as claude-approval-report.py) ---

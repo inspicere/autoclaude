@@ -83,8 +83,8 @@ These appear as `FALSE-POS` in the secrets report and are excluded from the Sec 
 
 | Env var | Default | Effect |
 |---------|---------|--------|
-| `HOOK_DEBUG` | `0` | `1` = emit debug trace to stderr |
-| `HOOK_AUDIT` | `1` | `1` = write JSONL to `~/.claude/hook-audit.jsonl` |
+| `HOOK_DEBUG` | `0` | Enable debug trace to stderr. Accepts `1`, `true`, `yes`, `on` (case-insensitive). |
+| `HOOK_AUDIT` | `1` | Write JSONL to `~/.claude/hook-audit.jsonl`. Accepts `1`, `true`, `yes`, `on` (case-insensitive). |
 
 Audit log: structured JSONL with timestamp, decision, tool, summary, reason, command. Atomic appends (O_APPEND), 0600 permissions, auto-rotates at 5MB. Secrets are redacted in all entries (known token patterns, JWTs, and secret variable assignments).
 
@@ -105,13 +105,17 @@ Audit log: structured JSONL with timestamp, decision, tool, summary, reason, com
 
 **What is NOT logged:** tool output, file contents, Read/Edit results. Only the command (input side) is captured.
 
-**Secret redaction:** All audit entries (block, warn, and allow) have the `command` field redacted before writing. Known token patterns → `<REDACTED>`, JWTs → `<REDACTED-JWT>`, secret variable assignments → `VAR_NAME=<REDACTED>`. Secrets that don't match a known pattern (e.g., short passwords, custom tokens) may still appear.
+**Secret redaction:** All audit entries (block, warn, and allow) have the `command`, `summary`, and `reason` fields redacted before writing. Known token patterns → `<REDACTED>`, JWTs → `<REDACTED-JWT>`, secret variable assignments → `VAR_NAME=<REDACTED>`. Secrets that don't match a known pattern (e.g., short passwords, custom tokens) may still appear.
 
-**Retention:** The log auto-rotates at 5MB (renamed to `.1` backup). No automatic deletion or expiry. On a typical workstation with moderate Claude Code usage, this reaches 5MB in weeks to months.
+**Retention model:** Single-backup. When the current log exceeds 5MB it is atomically renamed to `.jsonl.1`, overwriting any previous `.jsonl.1`. Steady-state disk usage is therefore bounded at ≤10MB (current + one backup). Rotation is race-safe under parallel hook invocations via `fcntl.flock` on a sidecar `.lock` file. On a typical workstation with moderate Claude Code usage, the current log reaches 5MB in weeks to months, at which point any data older than the previous rotation is discarded.
+
+**Aggressive retention (optional):** Users who want shorter retention can delete the backup explicitly, e.g. via cron:
+```
+0 3 * * * find ~/.claude -maxdepth 1 -name 'hook-audit.jsonl.1' -mtime +7 -delete
+```
 
 **Recommendations:**
-- Do not include `hook-audit.jsonl` in backups sent to untrusted storage
-- Periodically delete old logs: `rm ~/.claude/hook-audit.jsonl.1`
+- Do not include `hook-audit.jsonl*` in backups sent to untrusted storage
 - In shared environments, verify the file mode remains 0600
 - The `--warns` flag on `claude-approval-report.py` reads this log for analysis; it does not copy or transmit the data
 
