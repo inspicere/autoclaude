@@ -20,6 +20,22 @@ from functools import lru_cache
 from pathlib import Path
 from fnmatch import fnmatch
 
+
+def _read_version():
+    """Read version from pyproject.toml. Returns 'unknown' if not found."""
+    pyproject = Path(__file__).resolve().parent / "pyproject.toml"
+    if not pyproject.exists():
+        return "unknown"
+    try:
+        import tomllib
+        with open(pyproject, "rb") as f:
+            return tomllib.load(f).get("project", {}).get("version", "unknown")
+    except (OSError, ImportError, KeyError):
+        return "unknown"
+
+
+__version__ = _read_version()
+
 CLAUDE_DIR = Path.home() / ".claude"
 PROJECTS_DIR = CLAUDE_DIR / "projects"
 HOME_SLUG = "-" + str(Path.home()).lstrip("/").replace("/", "-")
@@ -3145,6 +3161,11 @@ def main():
             "full reference: docs/cli-reference.md"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"autoclaude {__version__}",
     )
     parser.add_argument(
         "-o", "--output",
