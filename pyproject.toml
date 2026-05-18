@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "autoclaude"
+version = "0.1.0"
+description = "Claude Code session analytics and secret-leak prevention hooks"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [
+    { name = "inspicere", email = "inspicere@homelab.equipment" },
+]
+keywords = ["claude-code", "security", "secrets", "hooks", "transcript-analysis"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Security",
+    "Topic :: System :: Monitoring",
+]
+dependencies = []  # stdlib-only by design
+
+[project.urls]
+Homepage = "https://git.internal.homelab.equipment/inspicere/autoclaude"
+Repository = "https://git.internal.homelab.equipment/inspicere/autoclaude"
+Documentation = "https://git.internal.homelab.equipment/inspicere/autoclaude/src/branch/main/docs"
+
+# Note on [project.scripts]: deliberately omitted. The CLI is shipped as a
+# hyphenated script `claude-approval-report.py` invoked via `python3 <path>`,
+# which is incompatible with Python module names. Adding a console-script
+# entry-point would require renaming the file (breaking change for callers)
+# or introducing a shim. Tracked as a future enhancement.
