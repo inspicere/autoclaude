@@ -990,20 +990,76 @@ def _check_single_command_access(command):
                     return f"git {sub} accesses sensitive file: {arg}"
 
     if base in ('tar', 'zip'):
-        for arg in parts[1:]:
-            if arg.startswith('-'):
+        # tar reads file lists from -T <path>, --files-from=<path>, --include-from,
+        # --exclude-from. Also handles bunched short flags ending in T
+        # (e.g. -cT/path or -cT /path where /path is the file-list source).
+        _TAR_NEXT_ARG_FLAGS = frozenset({
+            '-T', '--files-from', '--include-from', '--exclude-from', '--file',
+        })
+        _TAR_GLUED_LONG_FLAGS = (
+            '--files-from=', '--include-from=', '--exclude-from=', '--file=',
+        )
+        i = 1
+        while i < len(parts):
+            arg = parts[i]
+            # Next-arg form: -T <path>, --files-from <path>, etc.
+            if base == 'tar' and arg in _TAR_NEXT_ARG_FLAGS and i + 1 < len(parts):
+                val = parts[i + 1]
+                if _is_sensitive_path(val):
+                    return f"Command reads sensitive file via tar {arg}: {val}"
+                i += 2
                 continue
-            if _is_sensitive_path(arg):
+            # Glued long-flag form: --files-from=<path>
+            if base == 'tar' and any(arg.startswith(p) for p in _TAR_GLUED_LONG_FLAGS):
+                flag, _, val = arg.partition('=')
+                if _is_sensitive_path(val):
+                    return f"Command reads sensitive file via tar {flag}: {val}"
+                i += 1
+                continue
+            # Bunched short flag ending in T with value glued (-cT/path) or next-arg (-cT /path)
+            if base == 'tar' and arg.startswith('-') and not arg.startswith('--') and 'T' in arg[1:]:
+                t_idx = arg.index('T', 1)
+                glued_val = arg[t_idx + 1:]
+                if glued_val:
+                    if _is_sensitive_path(glued_val):
+                        return f"Command reads sensitive file via tar -T (bunched): {glued_val}"
+                elif arg.endswith('T') and i + 1 < len(parts):
+                    val = parts[i + 1]
+                    if _is_sensitive_path(val):
+                        return f"Command reads sensitive file via tar -T (bunched, next-arg): {val}"
+                    i += 2
+                    continue
+            # Positional sensitive path (existing behavior)
+            if not arg.startswith('-') and _is_sensitive_path(arg):
                 return f"Command archives sensitive file: {arg}"
+            i += 1
 
     if base == 'docker' and len(parts) > 1 and parts[1] == 'run':
         for i, arg in enumerate(parts):
+            # -v / --volume HOST:CONTAINER[:opts]
             if arg in ('-v', '--volume') and i + 1 < len(parts):
                 mount = parts[i + 1]
                 host_path = mount.split(':')[0]
                 expanded = os.path.expanduser(host_path)
                 if _is_sensitive_path(host_path) or _SENSITIVE_DIRS_RE.search(expanded):
                     return f"Command mounts sensitive path into container: {host_path}"
+            # --mount type=bind,source=PATH,target=... (next-arg or =-glued)
+            mount_val = None
+            if arg == '--mount' and i + 1 < len(parts):
+                mount_val = parts[i + 1]
+            elif arg.startswith('--mount='):
+                mount_val = arg[len('--mount='):]
+            if mount_val:
+                for kv in mount_val.split(','):
+                    if '=' not in kv:
+                        continue
+                    key, _, val = kv.partition('=')
+                    key = key.strip().lower()
+                    val = val.strip()
+                    if key in ('source', 'src'):
+                        expanded = os.path.expanduser(val)
+                        if _is_sensitive_path(val) or _SENSITIVE_DIRS_RE.search(expanded):
+                            return f"Command mounts sensitive path into container via --mount: {val}"
 
     if base == 'script':
         for i, arg in enumerate(parts[1:], 1):

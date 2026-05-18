@@ -26,6 +26,7 @@ SUITES = [
     ("hooks/test_warn_mode.py", "Warn Mode Tests"),
     ("hooks/test_warn_output_adversarial.py", "PostToolUse Adversarial Tests"),
     ("hooks/test_phase1_audit_fixes.py", "Phase 1 Audit Fixes Tests"),
+    ("hooks/test_round4_bypass_fixes.py", "Round 4 Bypass Fixes Tests"),
     ("scripts/check-pattern-sync.py", "Token Pattern Sync Check"),
 ]
 
