@@ -5,17 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.1.1] — 2026-05-21
+
+Patch release: three DefectDojo findings closed (two `block-secrets.py` false positives surfaced during the 2026-05-18 MetaMCP provisioning session, plus a semgrep false positive on a test fixture).
 
 ### Fixed
 
 - **`block-secrets.py` false positives on jq accessors and quoted format-string identifiers** (commit `b07b1c0`, 2026-05-20). Closes DefectDojo #3404 and #3405 (both Low, filed 2026-05-18 during MetaMCP provisioning).
   - **#3404** — `_SENSITIVE_PATH_RE`'s `\.(?:pem|key|p12|pfx)$` alternation matched any token ending in `.key`. The single-command file-reader path (`_check_single_command_access`) splits on whitespace without quote-awareness, so jq filter args like `map(.key` or bare `.key` reached `_is_sensitive_path` where `os.path.realpath` resolved them to `/cwd/map(.key` and the loose regex matched. Tightened the basename to `(?:^|/)\.?\w[\w.\-]*\.(?:pem|key|p12|pfx)$` so a real filename character is required before the extension. Mirrored the same change in `hooks/landlock-sandbox.py` (kept `scripts/check-pattern-sync.py` green).
   - **#3405** — `_RE_SECRET_ASSIGN` matched `<ident>=<value>` anywhere in the command. jq/awk/printf format strings containing field-name templates (`enable_api_key_auth=\(.enable_api_key_auth)`) inside a single-quoted filter looked like inline secret assignments. New `_is_position_inside_quotes(text, pos)` helper; `_check_command_secrets` now iterates `_RE_SECRET_ASSIGN.finditer` and skips matches whose `=` sits inside an unclosed quoted span. Real unquoted shell assignments (`API_KEY=...`, `TOKEN=...`) still block.
+- **Semgrep false positive on sample JWT used in redaction test** (commit `7bc6659`, 2026-05-21). Closes DefectDojo #3393 (High). Added `.semgrepignore` mirroring the existing `.gitleaks.toml` allowlist (`hooks/test_*.py`, `tests/test_*.py`, `hooks/block-secrets.py`, `hooks/warn-secrets-output.py`, `docs/hooks.md`, `settings/recommended-deny.json`). Repo-wide `semgrep scan --config auto .` now reports 0 findings (was 1).
 
 ### Tests
 
 - **1131 tests across 15 suites** (was 1119). New "FP-FIX 3" section in `hooks/test_fp_fixes.py` adds 12 cases — 7 negative (jq `.key` accessor, jq `to_entries[] | .key`, `keys_unsorted[]`, jq template with `enable_api_key_auth=\(...)`, awk header with `_auth` ident, echo of `enable_api_key_auth=true`, printf with `token=`/`auth_required=` idents) plus 5 positive controls (`API_KEY=`/`TOKEN=` real assignments and `/etc/ssl/private/server.key`/`./mycert.key`/`~/.ssh/foo.pem` still block).
+
+### Follow-up
+
+- **Vikunja #671** (P3) tracks the deeper architectural fix for #3404: `_check_single_command_access` uses `cmd.split()` instead of `shlex.split()`, so any future shell-quoting blind spot will recur. The regex tighten in this release closes the specific FP path; the broader audit is queued.
 
 ## [1.1.0] — 2026-05-18
 
