@@ -67,7 +67,7 @@ bash('ansible-lint playbooks/deploy.yml', label='ansible-lint')
 # =============================================================================
 print("\n=== SSH Operations ===")
 bash('ssh user@192.168.86.100 uptime', label='ssh uptime')
-bash('ssh -p 2222 user@192.168.86.103 nvidia-smi', label='ssh nvidia-smi')
+bash('ssh -p 2222 user@192.168.86.62 nvidia-smi', label='ssh nvidia-smi')
 bash('ssh user@host systemctl status nginx', label='ssh systemctl status')
 bash('ssh user@host journalctl -u docker --since "1 hour ago"', label='ssh journalctl')
 bash('ssh user@host df -h', label='ssh df -h')
