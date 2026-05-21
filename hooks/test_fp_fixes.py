@@ -68,6 +68,26 @@ test_hook('Write', {'file_path': '/tmp/setup.rb', 'content': 'source ' + S}, Tru
 # Write/Edit to a sensitive path should always be blocked regardless
 test_hook('Write', {'file_path': S, 'content': 'something harmless'}, True, 'Write to .env path (blocked)')
 
+print("\n=== FP-FIX 3: jq accessors and templates (DefectDojo #3404, #3405) ===")
+# DefectDojo #3404 — .key as a jq accessor inside a single-quoted filter must not
+# look like a read of a `.key` file.
+test_hook('Bash', {'command': "jq -r '.mcpServers.silverbullet | to_entries | map(.key + \": \" + (.value | type)) | .[]' ~/.mcp.json"}, False, 'jq map(.key) filter')
+test_hook('Bash', {'command': "jq -r '.data.data | to_entries[] | .key + \": \" + (.value | type)'"}, False, 'jq to_entries[] | .key')
+test_hook('Bash', {'command': "jq -r 'keys_unsorted[]'"}, False, 'jq keys_unsorted[]')
+# DefectDojo #3405 — `<ident>=<template>` inside a single-quoted jq/awk/printf
+# format string must not look like an inline secret assignment.
+test_hook('Bash', {'command': "jq -r '.x[] | \"name=\\(.name)  enable_api_key_auth=\\(.enable_api_key_auth)  use_query_param_auth=\\(.use_query_param_auth)\"'"}, False, 'jq template w/ _auth= ident')
+test_hook('Bash', {'command': "awk 'BEGIN{print \"name\\tapikey_auth\\tqparam_auth\"}{print}'"}, False, 'awk header w/ _auth ident')
+test_hook('Bash', {'command': "echo 'enable_api_key_auth=true'"}, False, 'echo literal _auth=true demo string')
+test_hook('Bash', {'command': "printf 'token=demo  auth_required=true\\n'"}, False, 'printf format w/ token=/auth_ idents')
+
+# Positive controls — real exposure must still block.
+test_hook('Bash', {'command': 'API_KEY=abcdefghijk1234567 curl http://x'}, True, 'real unquoted API_KEY= assignment (still blocks)')
+test_hook('Bash', {'command': 'TOKEN=abcdefghijk1234567 curl http://x'}, True, 'real unquoted TOKEN= assignment (still blocks)')
+test_hook('Bash', {'command': 'cat /etc/ssl/private/server.key'}, True, 'real /etc/.../server.key read (still blocks)')
+test_hook('Bash', {'command': 'cat ./mycert.key'}, True, 'real ./mycert.key read (still blocks)')
+test_hook('Bash', {'command': 'cat ~/.ssh/foo.pem'}, True, 'real ~/.ssh/foo.pem read (still blocks)')
+
 print(f"\n{'='*60}")
 print(f"Results: {results['pass']} passed, {results['fail']} failed")
 if results['fail'] > 0:

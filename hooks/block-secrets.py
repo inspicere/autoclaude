@@ -192,7 +192,7 @@ _SENSITIVE_PATH_RE = re.compile(
     r'(?:'
     r'(?:^|/)\.env(?:\.\w+)?$'
     r'|(?:^|/)\.dev\.vars(?:\.\w+)?$'
-    r'|\.(?:pem|key|p12|pfx)$'
+    r'|(?:^|/)\.?\w[\w.\-]*\.(?:pem|key|p12|pfx)$'
     r'|(?:^|/)\.aws/'
     r'|(?:^|/)\.ssh/id_'
     r'|(?:^|/)\.vault[-_]token$'
@@ -330,6 +330,36 @@ def _decode_ansi_c_quotes(cmd):
         s = s.replace('\\n', ' ').replace('\\t', ' ').replace('\\\\', '\\')
         return s
     return _RE_ANSI_C_QUOTE.sub(_replacer, cmd)
+
+
+def _is_position_inside_quotes(text, pos):
+    """Return True if text[pos] sits inside an unclosed single- or double-quoted span.
+
+    Used to skip _RE_SECRET_ASSIGN matches that occur inside jq/awk/printf format
+    strings (where `enable_api_key_auth=\\(.foo)` is a field-name template, not a
+    real shell assignment).
+    """
+    in_single = False
+    in_double = False
+    i = 0
+    while i < pos:
+        c = text[i]
+        if in_single:
+            if c == "'":
+                in_single = False
+        elif in_double:
+            if c == '\\' and i + 1 < pos:
+                i += 2
+                continue
+            if c == '"':
+                in_double = False
+        else:
+            if c == "'":
+                in_single = True
+            elif c == '"':
+                in_double = True
+        i += 1
+    return in_single or in_double
 
 
 def _shannon_entropy(data):
@@ -473,8 +503,15 @@ def _check_command_secrets(command):
             elif password and password.lower() not in _SAFE_PLACEHOLDERS:
                 return ("curl --user contains inline credentials", "block")
 
-    m = _RE_SECRET_ASSIGN.search(command)
-    if m and m.group(1).upper() not in _SAFE_SECRET_VAR_NAMES:
+    m = None
+    for candidate in _RE_SECRET_ASSIGN.finditer(command):
+        if candidate.group(1).upper() in _SAFE_SECRET_VAR_NAMES:
+            continue
+        if _is_position_inside_quotes(command, candidate.end(1)):
+            continue
+        m = candidate
+        break
+    if m:
         val = m.group(2).strip("\"'")
         if val.startswith(('$(', '`')):
             return (f"{m.group(1)} will be set from a secret source at runtime", "warn")
