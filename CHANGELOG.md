@@ -7,7 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_No changes yet._
+### Fixed
+
+- **`block-secrets.py` false positives on jq accessors and quoted format-string identifiers** (commit `b07b1c0`, 2026-05-20). Closes DefectDojo #3404 and #3405 (both Low, filed 2026-05-18 during MetaMCP provisioning).
+  - **#3404** — `_SENSITIVE_PATH_RE`'s `\.(?:pem|key|p12|pfx)$` alternation matched any token ending in `.key`. The single-command file-reader path (`_check_single_command_access`) splits on whitespace without quote-awareness, so jq filter args like `map(.key` or bare `.key` reached `_is_sensitive_path` where `os.path.realpath` resolved them to `/cwd/map(.key` and the loose regex matched. Tightened the basename to `(?:^|/)\.?\w[\w.\-]*\.(?:pem|key|p12|pfx)$` so a real filename character is required before the extension. Mirrored the same change in `hooks/landlock-sandbox.py` (kept `scripts/check-pattern-sync.py` green).
+  - **#3405** — `_RE_SECRET_ASSIGN` matched `<ident>=<value>` anywhere in the command. jq/awk/printf format strings containing field-name templates (`enable_api_key_auth=\(.enable_api_key_auth)`) inside a single-quoted filter looked like inline secret assignments. New `_is_position_inside_quotes(text, pos)` helper; `_check_command_secrets` now iterates `_RE_SECRET_ASSIGN.finditer` and skips matches whose `=` sits inside an unclosed quoted span. Real unquoted shell assignments (`API_KEY=...`, `TOKEN=...`) still block.
+
+### Tests
+
+- **1131 tests across 15 suites** (was 1119). New "FP-FIX 3" section in `hooks/test_fp_fixes.py` adds 12 cases — 7 negative (jq `.key` accessor, jq `to_entries[] | .key`, `keys_unsorted[]`, jq template with `enable_api_key_auth=\(...)`, awk header with `_auth` ident, echo of `enable_api_key_auth=true`, printf with `token=`/`auth_required=` idents) plus 5 positive controls (`API_KEY=`/`TOKEN=` real assignments and `/etc/ssl/private/server.key`/`./mycert.key`/`~/.ssh/foo.pem` still block).
 
 ## [1.1.0] — 2026-05-18
 
