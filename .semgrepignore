@@ -1,0 +1,17 @@
+# Mirrors .gitleaks.toml allowlist — these files contain intentional
+# secret-like strings (JWT samples, fake tokens, redaction fixtures,
+# regex patterns) for testing/documenting the scanners themselves.
+
+# Test fixtures
+hooks/test_*.py
+tests/test_*.py
+
+# The matchers — embed regex patterns that look like secrets
+hooks/block-secrets.py
+hooks/warn-secrets-output.py
+
+# Documentation of detected patterns
+docs/hooks.md
+
+# Canonical deny rules
+settings/recommended-deny.json
