@@ -743,8 +743,21 @@ def _strip_prefixes(cmd):
     return cmd
 
 
-def _strip_wrappers(parts):
-    """Strip command wrappers (sudo, env, time, etc.) and return remaining parts."""
+_ENV_VALUE_FLAGS = frozenset({
+    '-u', '--unset', '-C', '--chdir', '--block-signal', '--default-signal',
+})
+
+
+def _strip_wrappers_with_env(parts):
+    """Strip command wrappers and return (remaining_parts, captured_env_vars).
+
+    captured_env_vars is the list of 'KEY=VAL' strings consumed by env/sudo
+    wrappers — used by `_check_all_dangerous_env_assigns` to catch
+    `env BASH_ENV=<sensitive>` and `sudo BASH_ENV=<sensitive>` forms.
+    Only env/sudo accept KEY=VAL syntax in shell semantics; other wrappers
+    (timeout, nice, nohup, …) don't, so they capture nothing.
+    """
+    captured = []
     idx = 0
     while idx < len(parts):
         base = os.path.basename(parts[idx])
@@ -758,6 +771,7 @@ def _strip_wrappers(parts):
                         if idx < len(parts):
                             idx += 1
                 elif '=' in parts[idx]:
+                    captured.append(parts[idx])
                     idx += 1
                 else:
                     break
@@ -789,7 +803,15 @@ def _strip_wrappers(parts):
                     break
                 if arg.startswith('--split-string='):
                     break
-                if arg.startswith('-') or '=' in arg:
+                if arg in _ENV_VALUE_FLAGS:
+                    # Two-token flag form: '-u NAME', '--chdir DIR'.
+                    idx += 1
+                    if idx < len(parts):
+                        idx += 1
+                elif arg.startswith('-'):
+                    idx += 1
+                elif '=' in arg:
+                    captured.append(arg)
                     idx += 1
                 else:
                     break
@@ -864,7 +886,17 @@ def _strip_wrappers(parts):
                 idx += 1
         else:
             break
-    return parts[idx:]
+    return parts[idx:], captured
+
+
+def _strip_wrappers(parts):
+    """Strip command wrappers and return remaining parts (compat shim).
+
+    Wraps `_strip_wrappers_with_env` for callers that don't need the
+    captured env-var assignments.
+    """
+    remaining, _ = _strip_wrappers_with_env(parts)
+    return remaining
 
 
 def _check_sensitive_paths_in_text(text):
@@ -912,18 +944,44 @@ def _check_env_split_string(cmd):
     return None
 
 
-def _check_dangerous_env_prefixes(cmd):
-    """Check if env-var prefixes use dangerous auto-sourcing variables with sensitive paths."""
-    m = re.match(r'^(\w+=(?:\S+|"[^"]*"|\'[^\']*\')\s+)+', cmd.strip())
-    if not m:
-        return None
-    prefix = m.group(0)
-    for assign in re.finditer(r'(\w+)=((?:[^\s"\']+|"[^"]*"|\'[^\']*\'))', prefix):
-        var_name = assign.group(1)
-        val = assign.group(2).strip("\"'")
+def _check_all_dangerous_env_assigns(cmd):
+    """Detect dangerous env-var assignments to sensitive paths via any of:
+
+      1. Direct:    BASH_ENV=/etc/shadow bash -c '…'
+      2. env/sudo:  env  BASH_ENV=/etc/shadow bash -c '…'
+                    sudo BASH_ENV=/etc/shadow bash -c '…'
+
+    cd-chained forms (`cd dir && BASH_ENV=…`) are caught by Form 1 because
+    `_split_shell_commands` separates the segment on `&&` before this runs.
+    Returns reason string on hit, None otherwise.
+    """
+    text = cmd.strip()
+    # Form 1: direct KEY=VAL prefix at start of (sub)command.
+    m = re.match(r'^((?:\w+=(?:\S+|"[^"]*"|\'[^\']*\')\s+)+)', text)
+    if m:
+        for assign in re.finditer(
+                r'(\w+)=((?:[^\s"\']+|"[^"]*"|\'[^\']*\'))', m.group(1)):
+            var_name = assign.group(1)
+            val = assign.group(2).strip("\"'")
+            if var_name in _DANGEROUS_ENV_VARS and _is_sensitive_path(val):
+                return f"Dangerous env var {var_name} references sensitive file: {val}"
+
+    # Form 2: env/sudo wrapper consuming KEY=VAL args.
+    parts = text.split()
+    _, wrapper_assigns = _strip_wrappers_with_env(parts)
+    for raw in wrapper_assigns:
+        wm = re.match(r'^(\w+)=(.*)$', raw)
+        if not wm:
+            continue
+        var_name = wm.group(1)
+        val = wm.group(2).strip("\"'")
         if var_name in _DANGEROUS_ENV_VARS and _is_sensitive_path(val):
             return f"Dangerous env var {var_name} references sensitive file: {val}"
     return None
+
+
+# Backward-compat alias for any out-of-tree callers using the legacy name.
+_check_dangerous_env_prefixes = _check_all_dangerous_env_assigns
 
 
 def _check_single_command_access(command):
@@ -1498,7 +1556,7 @@ def main():
         secret_warnings = []
 
         for sub_cmd in sub_cmds:
-            env_reason = _check_dangerous_env_prefixes(sub_cmd)
+            env_reason = _check_all_dangerous_env_assigns(sub_cmd)
             if env_reason:
                 block(f"BLOCKED: {env_reason}")
 

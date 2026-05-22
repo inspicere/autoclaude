@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.2] — 2026-05-22
+
+Patch release: closes 2026-05-22 audit H1 (wrapper-prefixed dangerous env-var bypass). DefectDojo #3471, Vikunja #748.
+
+### Security
+
+- **`env`/`sudo`/`cd dir && env|sudo BASH_ENV=<sensitive>` bypass of dangerous-env-var detection** (H1, audit 2026-05-22). Pre-fix, `_check_dangerous_env_prefixes` matched only `^\w+=` at the start of a command, so `env BASH_ENV=/etc/shadow bash -c '…'` and `sudo BASH_ENV=/etc/shadow bash -c '…'` slipped through — `_strip_wrappers` consumed the assignment without checking it. The cd-chained direct form (`cd /tmp && BASH_ENV=…`) was already caught because `_split_shell_commands` separates segments on `&&`; cd-chained wrapper forms were not.
+  - New `_strip_wrappers_with_env(parts)` returns `(remaining_parts, captured_env_vars)`; the env/sudo branches now record `KEY=VAL` args instead of silently consuming them. `_strip_wrappers` becomes a thin shim that discards the captures.
+  - New `_check_all_dangerous_env_assigns(cmd)` unifies the direct-prefix check (regex at start of command) and the wrapper-capture check. The main loop now calls this once per sub_cmd.
+  - Backward-compat alias `_check_dangerous_env_prefixes = _check_all_dangerous_env_assigns` retained.
+  - Also fixed: `env -u NAME` two-token flag form (`_ENV_VALUE_FLAGS` now covers `-u`, `--unset`, `-C`, `--chdir`, `--block-signal`, `--default-signal`). Pre-fix, `_strip_wrappers` broke on the `NAME` token and missed any trailing `KEY=VAL`.
+
+### Tests
+
+- **1209 tests across 16 suites** (was 1131). New `hooks/test_phase4_audit_fixes.py` (78 cases): 6 forms × 10 dangerous vars + 8 negative controls + 5 edge cases (sudo env stacked, env -i, env -u NAME, env --split-string regression, subshell-content regression) + 2 direct-form regressions + 3 wrapper+file-reader regressions. The new suite was written failing-first against the unchanged hook (35 passed / 43 failed) before the fix landed.
+
+### Follow-up
+
+- 2026-05-22 audit H2 (PostToolUse `decision: "warn"` schema conformance) deferred to v1.2.0 alongside the Phase 2 correlation/perf work.
+
 ## [1.1.1] — 2026-05-21
 
 Patch release: three DefectDojo findings closed (two `block-secrets.py` false positives surfaced during the 2026-05-18 MetaMCP provisioning session, plus a semgrep false positive on a test fixture).
