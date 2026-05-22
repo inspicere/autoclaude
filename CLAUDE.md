@@ -115,5 +115,6 @@ The hooks and main script have been through multiple rounds of adversarial revie
 | Red team rounds 1-2 (7 + 15 bypass classes, 10 agents) | 2026-05-08 | All fixable resolved | [`docs/history/red-team-2026-05-08.md`](docs/history/red-team-2026-05-08.md) |
 | Red team round 3 (10 confirmed + 25 analysis-only) | 2026-05-10 | All confirmed fixed | [`docs/history/red-team-2026-05-10.md`](docs/history/red-team-2026-05-10.md) |
 | 12-dimension project audit (2 H, 11 M, 13 L, 7 I) | 2026-05-16 | 14/14 closed | [`docs/history/audit-2026-05-16.md`](docs/history/audit-2026-05-16.md) |
+| 12-dimension project audit (2 H, 8 M, 13 L, 9 I) | 2026-05-22 | filed | [`docs/history/audit-2026-05-22.md`](docs/history/audit-2026-05-22.md) |
 
 Read the archives when planning new bypass-prevention work — every round teaches a pattern of attack the static analyzer didn't anticipate. Architectural gaps that remain unfixable by static analysis (shell function indirection, bash array expansion, runtime path construction, generic write-then-execute, symlink TOCTOU, MCP passthrough) are documented in [`docs/hooks.md`](docs/hooks.md). The Landlock sandbox prototype at `hooks/landlock-sandbox.py` addresses these at the kernel level.
