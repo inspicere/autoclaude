@@ -443,11 +443,23 @@ _SHORT_P_PASSWORD_COMMANDS = frozenset({
 def _classify_leak_confidence(command):
     """Estimate whether a runtime-expanded secret is likely to appear in output.
 
-    Returns 'high' if the command is likely to print the secret to stdout,
-    'low' if the secret is consumed silently (e.g. sent in a request header).
+    Returns 'high' if the command is likely to print the secret to stdout/
+    stderr-merged-to-stdout, 'low' if the secret is consumed silently (e.g.
+    sent in a request header without verbose output).
     """
     lower = command.lower()
     if re.search(r'\becho\b|\bprintf\b', lower):
+        return "high"
+    # Verbose flags route request/response details (including auth headers)
+    # to stderr. With 2>&1 they land in the transcript; even without, they
+    # appear in the user's interactive view. `\b--verbose\b` does NOT match
+    # `--verbose` — `\b` is not a boundary between two `-` chars — so we use
+    # a non-word-non-dash lookbehind instead.
+    if re.search(r'(?<![\w-])--(?:verbose|trace|trace-ascii)\b', lower):
+        return "high"
+    if re.search(r'(?<![\w-])-v{1,3}(?![\w-])', lower):
+        return "high"
+    if '2>&1' in command:
         return "high"
     if re.search(r'>\s*/dev/null|--output\s+/dev/null|-o\s+/dev/null', lower):
         return "low"
@@ -488,6 +500,18 @@ def _check_command_secrets(command):
             val = auth_val.group(1).strip("\"'")
             if val.startswith('$'):
                 return ("Authorization header will expand a secret variable at runtime", "warn")
+            # Pipe-safe carveout: `… | xargs -I{} curl -H "Authorization:
+            # token {}" …` lets xargs substitute each stdin line as the
+            # auth value. The literal `{}` never lands in command-line
+            # history or transcript. Mirrors the `pipe-safe` classification
+            # in claude-approval-report.py's _classify_exposure_risk.
+            #
+            # `_split_shell_commands` strips the pipe, so we can't gate on
+            # `'|' in command` like the report does. Instead match xargs's
+            # substitution syntax structurally: `xargs … -I{val}`.
+            if val in ('{}', '{0}') and re.search(
+                    r'\bxargs\b[^|;]*-I\s*' + re.escape(val), command):
+                return None
             elif val.lower() not in _SAFE_PLACEHOLDERS:
                 return ("Command contains an Authorization header with credentials", "block")
         else:

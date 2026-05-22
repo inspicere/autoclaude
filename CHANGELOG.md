@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] — 2026-05-22
+
+Minor release: closes 2026-05-22 audit H2 (silently-ignored PostToolUse output) plus three Medium/Low items and the v1.1.2-discovered #758 follow-up.
+
+### Security / Reliability
+
+- **H2 — PostToolUse hook output uses unsupported `decision: "warn"`** (audit 2026-05-22). Per [the current Claude Code hooks spec](https://code.claude.com/docs/en/hooks), the only valid top-level `decision` value for PostToolUse is `"block"`; `"warn"` is silently ignored. The hook has been a no-op since it was written — every secret leak surfaced after tool execution went unannounced to the model. `hooks/warn-secrets-output.py` now emits `{"decision": "block", "reason": …}` so the warning text reaches Claude as tool-result feedback. The tool has already run, so this still cannot prevent the leak; it ensures the model stops using the exposed value. Closes DefectDojo #3472, Vikunja #749.
+
+- **2.4 — `_classify_leak_confidence` now flags `curl -v/-vvv/--verbose/--trace` and `2>&1` as "high"** confidence exposure (audit 2026-05-22 Low). Pre-fix, only `echo`/`printf` were "high"; other commands that route auth headers to stderr (or merge stderr into stdout) were marked "low", understating the risk. Also fixes a regex gotcha: `\b--verbose\b` does not match `--verbose` because two `-` chars don't constitute a word boundary; replaced with `(?<![\w-])--(?:verbose|trace|trace-ascii)\b`.
+
+- **#758 — `xargs -I{} curl -H "Authorization: token {}"` pipe pattern blocked despite being safe** (filed 2026-05-22 from v1.1.2 post-push). The hook treated `{}` as a literal credential and exited 2. The report script's `_classify_exposure_risk` already classifies this exact form as `pipe-safe` (xargs substitutes each stdin line; the literal `{}` never appears in command history). The hook now mirrors that carveout structurally — when the auth value is `{}` or `{0}` AND the command contains `xargs … -I<placeholder>` matching that value, the hook allows. `_split_shell_commands` strips the actual pipe character, so the carveout matches `xargs -I{}` structurally rather than the report's `'|' in cmd` check.
+
+- **2.2 — `_extract_variable_names` now catches double-quoted and backtick command substitution** (audit 2026-05-22 Medium). The PostToolUse correlation reads recent PreToolUse warn entries and extracts variable names assigned from subshells, so it can recognise high-entropy values in tool output as likely expanded secrets. Pre-fix the regex was `\b\w+=\$\(` — `TOK="$(…)"`, `TOK=`…`​`, and `TOK="`…`​"` were missed. New `_RE_VAR_TO_SUBSHELL = r'\b(\w+)="?(?:\$\(|`)'` covers all four forms (single-quoted is excluded because bash treats single quotes as literal).
+
+### Tests
+
+- **1233 tests across 17 suites** (was 1209/16). New `hooks/test_phase5_audit_fixes.py` (132 lines, 24 cases): H2 PostToolUse schema (5 cases), 2.4 confidence grading (6 cases), #758 pipe-safe carveout (6 cases), 2.2 var-name extraction (5 cases), regression (2 cases). Written failing-first against unchanged code (10 passed / 14 failed), 24/24 after fix.
+
+### Deferred
+
+The audit's Phase 2 perf items (2.1 realpath pre-filter, 2.3 git-log wall-clock budget) deferred to a later patch. 2.1 carries a symlink-coverage tradeoff worth its own discussion; 2.3 is in a different file and not yet shown to be a real bottleneck.
+
 ## [1.1.2] — 2026-05-22
 
 Patch release: closes 2026-05-22 audit H1 (wrapper-prefixed dangerous env-var bypass). DefectDojo #3471, Vikunja #748.

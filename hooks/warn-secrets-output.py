@@ -146,6 +146,11 @@ _AUDIT_LOG = os.path.join(os.path.expanduser("~"), ".claude", "hook-audit.jsonl"
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 _CORRELATE = os.environ.get("HOOK_CORRELATE", "1").lower() in _TRUTHY
 _RE_VAR_FROM_REASON = re.compile(r'^(\w+) will (?:be set|expand)')
+# Capture variable names assigned from command/process substitution in any of:
+#   TOK=$(…)   TOK="$(…)"   TOK=`…`   TOK="`…`"
+# Single-quoted forms ('$(…)') are literal in bash and never substitute, so
+# they're excluded.
+_RE_VAR_TO_SUBSHELL = re.compile(r'\b(\w+)="?(?:\$\(|`)')
 
 
 def _read_recent_warns(max_age_seconds=30):
@@ -196,7 +201,7 @@ def _extract_variable_names(warn_records):
         if m:
             names.add(m.group(1))
         cmd = rec.get("command", "")
-        for m2 in re.finditer(r'\b(\w+)=\$\(', cmd):
+        for m2 in _RE_VAR_TO_SUBSHELL.finditer(cmd):
             names.add(m2.group(1))
     return names
 
@@ -264,8 +269,13 @@ def main():
         sys.exit(0)
 
     types = ", ".join(findings)
+    # PostToolUse: per https://code.claude.com/docs/en/hooks the only valid
+    # top-level decision value is "block" (feeds reason back to Claude as
+    # tool-result feedback). "warn" is silently ignored. The tool has
+    # already executed; this output cannot prevent the leak, only inform
+    # the model so it stops using the value.
     response = {
-        "decision": "warn",
+        "decision": "block",
         "reason": (
             f"SECRET IN OUTPUT: {types}. "
             f"{source_desc} produced output containing secrets. "

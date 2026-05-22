@@ -29,6 +29,7 @@ SUITES = [
     ("hooks/test_round4_bypass_fixes.py", "Round 4 Bypass Fixes Tests"),
     ("hooks/test_phase3_audit_fixes.py", "Phase 3 Audit Fixes Tests"),
     ("hooks/test_phase4_audit_fixes.py", "Phase 4 Audit Fixes Tests"),
+    ("hooks/test_phase5_audit_fixes.py", "Phase 5 Audit Fixes Tests"),
     ("scripts/check-pattern-sync.py", "Token Pattern Sync Check"),
 ]
 
