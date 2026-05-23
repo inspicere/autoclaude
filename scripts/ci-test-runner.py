@@ -31,6 +31,7 @@ SUITES = [
     ("hooks/test_phase4_audit_fixes.py", "Phase 4 Audit Fixes Tests"),
     ("hooks/test_phase5_audit_fixes.py", "Phase 5 Audit Fixes Tests"),
     ("hooks/test_phase6_audit_fixes.py", "Phase 6 Audit Fixes Tests"),
+    ("hooks/test_phase7_audit_fixes.py", "Phase 7 Audit Fixes Tests"),
     ("scripts/check-pattern-sync.py", "Token Pattern Sync Check"),
 ]
 

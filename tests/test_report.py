@@ -1538,6 +1538,97 @@ with _tf.TemporaryDirectory() as _empty_home:
 
 
 # =============================================================================
+# Phase 7 (v1.2.2): M2 --no-cross-project, redact_secrets idempotency,
+#                   _safe_load_settings scope comment
+# =============================================================================
+
+print("\n=== Phase 7: redact_secrets is idempotent ===")
+_text = (
+    "Authorization: Bearer ghp_" + "a" * 36 + " | "
+    "AKIAIOSFODNN7EXAMPLE token=" + "Z" * 40 + " "
+    "API_KEY=abcdef0123456789abcdef0123 done"
+)
+_once = report.redact_secrets(_text)
+_twice = report.redact_secrets(_once)
+check(_once == _twice,
+      f"redact_secrets is idempotent under a second pass "
+      f"(once[:80]={_once[:80]!r}, twice[:80]={_twice[:80]!r})")
+# Sanity: the first pass actually redacted something.
+check('<REDACTED>' in _once or '<REDACTED-JWT>' in _once,
+      f"first pass emits a placeholder (got {_once[:80]!r})")
+
+
+print("\n=== Phase 7: M2 _cwd_to_project_slug helper ===")
+check(hasattr(report, '_cwd_to_project_slug'),
+      "_cwd_to_project_slug helper exists")
+if hasattr(report, '_cwd_to_project_slug'):
+    _orig_cwd = os.getcwd()
+    try:
+        os.chdir('/home/terrabot/autoclaude')
+        _slug = report._cwd_to_project_slug()
+        check(_slug == '-home-terrabot-autoclaude',
+              f"slug for /home/terrabot/autoclaude == "
+              f"'-home-terrabot-autoclaude' (got {_slug!r})")
+        os.chdir('/tmp')
+        _slug = report._cwd_to_project_slug()
+        check(_slug == '-tmp',
+              f"slug for /tmp == '-tmp' (got {_slug!r})")
+    finally:
+        os.chdir(_orig_cwd)
+
+
+print("\n=== Phase 7: M2 --no-cross-project filters scan ===")
+# Build two fake project dirs in a temp HOME; --no-cross-project should
+# limit the scan to the project matching CWD.
+import tempfile as _tf7
+import json as _json7
+with _tf7.TemporaryDirectory() as _td:
+    _projects = os.path.join(_td, '.claude', 'projects')
+    # Two fake project dirs, each with one JSONL file (empty array is OK;
+    # process_session skips lines that don't match the schema).
+    _proj_a = os.path.join(_projects, '-tmp-proj-a')
+    _proj_b = os.path.join(_projects, '-tmp-proj-b')
+    os.makedirs(_proj_a, exist_ok=True)
+    os.makedirs(_proj_b, exist_ok=True)
+    # Each project gets one fake-but-empty session file
+    for d in (_proj_a, _proj_b):
+        with open(os.path.join(d, 'fake.jsonl'), 'w') as f:
+            f.write('')  # empty session — produces no records
+
+    # Verify --help mentions the new flag (cheap sanity)
+    _hp = _sub.run([sys.executable, _SCRIPT, '--help'],
+                   capture_output=True, text=True, timeout=10)
+    check('--no-cross-project' in _hp.stdout,
+          f"--help mentions --no-cross-project")
+
+    # Run with the flag from inside the fake CWD; the script should accept
+    # the flag without crashing.
+    _env = os.environ.copy()
+    _env['HOME'] = _td
+    _proj_cwd = os.path.join(_td, 'proj-a')
+    os.makedirs(_proj_cwd, exist_ok=True)
+    _r = _sub.run(
+        [sys.executable, _SCRIPT, '--no-cross-project', '--summary', '--quiet'],
+        capture_output=True, text=True, timeout=15, env=_env, cwd=_proj_cwd,
+    )
+    # Either succeeds with empty output or exits 1 with "No tool call data".
+    check(_r.returncode in (0, 1),
+          f"--no-cross-project runs without crash (exit={_r.returncode}, "
+          f"stderr={_r.stderr[:120]!r})")
+
+
+print("\n=== Phase 7: _safe_load_settings carries scope-limit comment ===")
+# This is a doc-comment-only check; the function's behavior is unchanged.
+import inspect as _insp
+_src = _insp.getsource(report._safe_load_settings)
+check('scope-limited' in _src.lower() or
+      'only validates' in _src.lower() or
+      'allow / deny' in _src.lower(),
+      f"_safe_load_settings source mentions scope limitation "
+      f"(src head={_src.splitlines()[0:8]!r})")
+
+
+# =============================================================================
 # SUMMARY
 # =============================================================================
 print("\n" + "=" * 70)

@@ -622,6 +622,11 @@ def _unwrap_grouping(command):
 
 
 _MAX_UNWRAP_DEPTH = 8
+# Soft cap on the number of shell-command segments the hook will process
+# (split on `;`, `&&`, `||`, `|`, plus command/process/backtick substitutions).
+# Pathological inputs with thousands of segments turn the per-segment scan
+# into local-DoS; 500 is well above realistic CI/automation chains.
+_MAX_COMMAND_SEGMENTS = 500
 
 
 def _split_shell_commands(command, _depth=0):
@@ -1558,6 +1563,17 @@ def main():
             sub_cmds.extend(_split_shell_commands(m.group(1)))
         for m in _RE_BACKTICK_SUBST.finditer(command_for_scan):
             sub_cmds.extend(_split_shell_commands(m.group(1)))
+
+        # Fail-closed cap on segment count. Realistic commands have <50
+        # segments; pathological inputs (thousands of `;`/`&&`/`|`) could
+        # turn the per-segment analysis into local-DoS. 500 is generous
+        # enough that real CI/automation chains aren't blocked.
+        if len(sub_cmds) > _MAX_COMMAND_SEGMENTS:
+            block(
+                f"BLOCKED: command too complex to validate safely "
+                f"({len(sub_cmds)} segments > {_MAX_COMMAND_SEGMENTS} cap). "
+                f"Break it into smaller invocations."
+            )
 
         _HEREDOC_SHELLS = _INTERPRETERS | {'bash', 'sh', 'zsh', 'dash', 'ksh'}
         if _RE_HEREDOC.search(command):

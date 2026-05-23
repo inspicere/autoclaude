@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.2] — 2026-05-22
+
+Patch release: closes audit Medium M2 (cross-project transcript reads) and four remaining Lows. After this ship the audit's actionable items are down to one deferred Medium (2.1 realpath pre-filter) and a small tail of accept-as-is observations.
+
+### Privacy / Configuration
+
+- **M2 — `--no-cross-project` flag for `claude-approval-report.py`** (audit 2026-05-22). Default behavior (cross-project scan) is unchanged for backwards compatibility. New `--no-cross-project` constrains the scan to the project matching the current working directory by computing the Claude Code project slug from `os.getcwd()` (`/home/terrabot/autoclaude` → `-home-terrabot-autoclaude`). Mutually exclusive with `--project` — passing both errors out at parse time. New helper `_cwd_to_project_slug()` exported for testability. README documents the default scan posture; users who don't want cross-project reads can now `alias claude-approval-report='claude-approval-report.py --no-cross-project'`.
+
+### Hardening (Lows)
+
+- **L (split-cap) — `_split_shell_commands` segment-count fail-closed cap** (audit 2026-05-22 Low). New `_MAX_COMMAND_SEGMENTS = 500` constant. Pathological commands with thousands of `;`/`&&`/`||`/`|` segments (or substitutions thereof) now block with `"command too complex to validate safely"` instead of forcing the per-segment scan to chew through them. Realistic CI/automation chains are well under the cap.
+
+- **L (safe-load-scope) — `_safe_load_settings` docstring documents its scope** (audit 2026-05-22 Low). The function only validates `permissions.allow` and `permissions.deny` because that's all this module reads. Other top-level keys (`hooks`, `mcpServers`, `permissions.ask`) pass through untouched. The docstring now says so explicitly so future readers don't assume the validator covers more than it does.
+
+- **L (redact-idempotency) — regression test that `redact_secrets` is idempotent** (audit 2026-05-22 Low). The function already was idempotent; the new assertion in `tests/test_report.py` guards against a future placeholder-string change accidentally producing a second pass with different output. Test runs against a mixed payload (GitHub PAT, AWS key, high-entropy blob, `API_KEY=…`) and asserts `redact_secrets(once) == once`.
+
+- **L (laima-disclosure) — README note about committed `.claude/settings.local.json`** (audit 2026-05-22 Low). The file contains Laima-specific IPs and hostnames as a working example. Added a "Repository note" callout next to the existing "Privacy note" so downstream adopters know to replace it rather than treat it as a recommended baseline.
+
+### Tests
+
+- **1279 tests across 19 suites** (was 1262/18). New `hooks/test_phase7_audit_fixes.py` (9 cases: 6 for the segment cap, 3 regression). 7 new assertions in `tests/test_report.py` (idempotency × 2, `_cwd_to_project_slug` × 3, `--help` flag mention × 1, `--no-cross-project` end-to-end × 1, scope-comment grep × 1). Written failing-first; 5 baseline failures matched the audit predictions (2 L-cap + 3 M2).
+
+### Audit closure status
+
+- **Highs:** 2 of 2 closed (v1.1.2, v1.2.0).
+- **Mediums:** 6 of 8 closed (M2 here; M1=2.1 realpath remains deferred pending measured perf data; M3 was covered by H1 in v1.1.2).
+- **Lows:** 9 of 13 closed across v1.1.2 + v1.2.0 + v1.2.1 + v1.2.2; remaining items are accept-as-is observations or deferred features (e.g., `HOOK_DEBUG_FORMAT=json`, `find_recipe_ngrams` O(N²) optimization).
+
 ## [1.2.1] — 2026-05-22
 
 Patch release: closes two remaining Mediums (M7, M8), one Medium perf safeguard (2.3 deferred from v1.2.0), and the audit's Low bundle (L2, L10, L11, L12). Audit Medium 2.1 (realpath pre-filter) remains deferred pending measured perf data — it carries a symlink-coverage tradeoff worth its own ship. M2 (cross-project transcript reads) also deferred — it's a feature change worth its own ship.

@@ -41,6 +41,16 @@ CLAUDE_DIR = Path.home() / ".claude"
 PROJECTS_DIR = CLAUDE_DIR / "projects"
 HOME_SLUG = "-" + str(Path.home()).lstrip("/").replace("/", "-")
 
+
+def _cwd_to_project_slug():
+    """Return the Claude Code project slug matching the current working dir.
+
+    Claude Code mirrors filesystem paths to projects by replacing `/` with `-`
+    and prefixing a leading `-`. /home/terrabot/autoclaude → -home-terrabot-autoclaude.
+    Used by --no-cross-project to constrain the scan to the CWD's project.
+    """
+    return "-" + os.getcwd().lstrip("/").replace("/", "-")
+
 _RE_CD_PREFIX = re.compile(r'^(cd\s+(?:\S+|"[^"]*"|\'[^\']*\')\s*&&\s*)+')
 _RE_ENV_PREFIX = re.compile(r'^(\w+=(?:\S+|"[^"]*"|\'[^\']*\')\s+)+')
 _RE_SHELL_OPS = re.compile(r'^[&|;]+\s*')
@@ -404,6 +414,13 @@ def _safe_load_settings(path):
       - permissions is absent or an object
       - permissions.allow / permissions.deny are absent or lists
     Repairs partially-bad shapes by zeroing out the offending sub-field.
+
+    NOTE — scope-limited validation. Only the `permissions.allow` and
+    `permissions.deny` shapes are checked because they're the only fields
+    this module reads. Other top-level keys (`hooks`, `mcpServers`,
+    `permissions.ask`, etc.) pass through untouched and could be malformed
+    without producing a warning. Callers that read those fields need to do
+    their own shape checks.
     """
     path = Path(path) if not isinstance(path, Path) else path
     if not path.exists():
@@ -3289,6 +3306,14 @@ def main():
         help="Filter to a single project by name (e.g. 'laima', 'vsdx-forge').",
     )
     parser.add_argument(
+        "--no-cross-project",
+        action="store_true",
+        default=False,
+        help="Restrict the scan to the project matching the current working "
+             "directory. By default the analyzer reads transcripts from every "
+             "project under ~/.claude/projects/. Mutually exclusive with --project.",
+    )
+    parser.add_argument(
         "--json",
         action="store_true",
         default=False,
@@ -3445,6 +3470,13 @@ def main():
     )
     args = parser.parse_args()
 
+    # --no-cross-project narrows the default scan; mutually exclusive with
+    # an explicit --project filter so the user's intent stays unambiguous.
+    if args.no_cross_project and args.project:
+        print("Error: --no-cross-project and --project are mutually exclusive.",
+              file=sys.stderr)
+        sys.exit(2)
+
     # Surface the --apply mutating --auto silent downgrade so the user knows
     # their stated intent wasn't fully honored. Print before any data load
     # so an empty-session early-exit still shows the warning.
@@ -3499,6 +3531,15 @@ def main():
                 all_prose.extend(extract_user_prose(str(sf), project_name))
     else:
         project_dirs = sorted(PROJECTS_DIR.iterdir()) if PROJECTS_DIR.exists() else []
+        if args.no_cross_project:
+            target_slug = _cwd_to_project_slug()
+            project_dirs = [d for d in project_dirs if d.name == target_slug]
+            if not project_dirs and not args.quiet:
+                print(
+                    f"--no-cross-project: no transcripts found for slug "
+                    f"{target_slug!r} (cwd={os.getcwd()!r})",
+                    file=sys.stderr,
+                )
         for project_dir in project_dirs:
             if not project_dir.is_dir():
                 continue

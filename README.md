@@ -64,6 +64,8 @@ See [docs/hooks.md](docs/hooks.md) for detection details, limitations, and confi
 
 > **Privacy note:** `HOOK_AUDIT=1` is the default. The PreToolUse hook writes a structured JSONL audit log to `~/.claude/hook-audit.jsonl` (mode 0600) capturing every Bash command (redacted), Read/Edit/Write path, and decision. Auto-rotates at 5 MB (one-backup model). Set `HOOK_AUDIT=0` to disable, or see [docs/hooks.md](docs/hooks.md#audit-log-data-surface-and-retention) for retention and redaction details.
 
+> **Repository note:** `.claude/settings.local.json` in this repo is checked in as a working example tied to the **Laima homelab** that birthed the project. It contains internal IPs (`192.168.86.*`), hostnames (`rocky-ai-01`, `bullwinkle-vm-02`, etc.), and Laima-specific Ansible/Docker command allows. Adapt or replace it for your environment before mirroring; the example demonstrates allowlist shape, not a recommended baseline.
+
 ### Landlock kernel sandbox (prototype)
 
 The static-analysis hooks can't catch runtime indirection: shell function calls (`r() { cat "$1"; }; r .env`), bash array expansion, or interpreter path construction. The Landlock sandbox solves this at the kernel level — it restricts `open()` syscalls regardless of how the path was derived.
