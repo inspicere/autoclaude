@@ -46,6 +46,7 @@ NR_landlock_restrict_self = 446
 _SENSITIVE_PATH_RE = re.compile(
     r'(?:'
     r'(?:^|/)\.env(?:\.\w+)?$'
+    r'|(?:^|/)\.envrc$'
     r'|(?:^|/)\.dev\.vars(?:\.\w+)?$'
     r'|(?:^|/)\.?\w[\w.\-]*\.(?:pem|key|p12|pfx)$'
     r'|(?:^|/)\.aws/'

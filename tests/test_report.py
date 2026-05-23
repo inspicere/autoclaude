@@ -1328,13 +1328,16 @@ _r = _sp.run([sys.executable, _script, "--help"],
 check("--quiet" in _r.stdout or "-q," in _r.stdout,
       f"--help mentions --quiet (got tail={_r.stdout[-300:]!r})")
 
+# Live-scan timeout: --summary runs against ~/.claude/projects/ which has
+# grown over time. 30s was flaky as the session corpus crossed ~39k records;
+# 90s gives margin without masking a real regression.
 _r = _sp.run([sys.executable, _script, "--summary", "--quiet"],
-             capture_output=True, text=True, timeout=30)
+             capture_output=True, text=True, timeout=90)
 check("Scanning Claude Code" not in _r.stderr,
       f"--quiet suppresses 'Scanning' (got stderr={_r.stderr[:200]!r})")
 
 _r = _sp.run([sys.executable, _script, "--summary"],
-             capture_output=True, text=True, timeout=30)
+             capture_output=True, text=True, timeout=90)
 check("Scanning Claude Code" in _r.stderr,
       f"default still prints 'Scanning' (got stderr={_r.stderr[:200]!r})")
 
@@ -1392,6 +1395,146 @@ _deep = "(" * 50 + "cat /tmp/safe" + ")" * 50
 _out = _hook._split_shell_commands(_deep)
 check(isinstance(_out, list),
       f"deep nesting returns a list (got {type(_out).__name__})")
+
+
+# =============================================================================
+# Phase 6 (v1.2.1): 2.3 git-log budget, M8 settings mode preservation,
+#                   L10 --why label, L11 --help env vars, L12 --auto warning
+# =============================================================================
+
+import subprocess as _sub
+import tempfile as _tf
+import stat as _stat
+import json as _json6
+import time as _time6
+
+_SCRIPT = _op.join(_op.dirname(__file__), '..', 'claude-approval-report.py')
+
+
+print("\n=== Phase 6: 2.3 _git_commit_count wall-clock budget ===")
+check(hasattr(report, '_STABILITY_TOTAL_BUDGET_SECONDS'),
+      "_STABILITY_TOTAL_BUDGET_SECONDS constant exists")
+check(getattr(report, '_STABILITY_TOTAL_BUDGET_SECONDS', 0) > 0,
+      f"budget > 0 (got {getattr(report, '_STABILITY_TOTAL_BUDGET_SECONDS', 0)})")
+
+# Reset internal state so the test is hermetic. Module-level cache and budget
+# counter are exposed under known names.
+if hasattr(report, '_git_commit_count'):
+    report._git_commit_count.cache_clear()
+if hasattr(report, '_reset_stability_budget'):
+    report._reset_stability_budget()
+
+# Simulate exhausted budget by pinning the consumed counter near the cap.
+if hasattr(report, '_STABILITY_TOTAL_BUDGET_SECONDS') and hasattr(report, '_set_stability_budget_used'):
+    report._set_stability_budget_used(report._STABILITY_TOTAL_BUDGET_SECONDS + 1.0)
+    out = report._git_commit_count('/nonexistent/path/that/will/never/exist')
+    check(out is None,
+          f"exhausted budget returns None (got {out!r})")
+    report._reset_stability_budget()
+
+
+print("\n=== Phase 6: M8 _write_settings preserves existing file mode ===")
+with _tf.TemporaryDirectory() as _td:
+    p644 = _op.join(_td, 'settings_644.json')
+    with open(p644, 'w') as f:
+        f.write('{}')
+    os.chmod(p644, 0o644)
+
+    # Use the same Path-handling that callers use (pathlib).
+    from pathlib import Path as _Path
+    report._write_settings(_Path(p644), {'permissions': {'allow': ['Bash(ls *)']}}, dry_run=False)
+    mode = _stat.S_IMODE(os.stat(p644).st_mode)
+    check(mode == 0o644,
+          f"existing 0o644 preserved (got 0o{mode:o})")
+
+    p600 = _op.join(_td, 'settings_600.json')
+    with open(p600, 'w') as f:
+        f.write('{}')
+    os.chmod(p600, 0o600)
+    report._write_settings(_Path(p600), {'permissions': {'allow': ['Bash(ls *)']}}, dry_run=False)
+    mode = _stat.S_IMODE(os.stat(p600).st_mode)
+    check(mode == 0o600,
+          f"existing 0o600 preserved (got 0o{mode:o})")
+
+    # New file: defaults to 0o600 (no prior mode to preserve)
+    pnew = _op.join(_td, 'subdir', 'settings_new.json')
+    os.makedirs(_op.dirname(pnew), exist_ok=True)
+    report._write_settings(_Path(pnew), {'permissions': {'allow': []}}, dry_run=False)
+    mode = _stat.S_IMODE(os.stat(pnew).st_mode)
+    check(mode == 0o600,
+          f"new file defaults to 0o600 (got 0o{mode:o})")
+
+
+print("\n=== Phase 6: L10 render_why uses unambiguous allowlist label ===")
+# Build a tiny in-memory record set and capture render_why output.
+import io as _io6
+_rec = {
+    'project': '-home-terrabot-autoclaude',
+    'session': 'test.jsonl',
+    'tool_name': 'Bash',
+    'tool_input': {'command': 'git status'},
+    'display': 'Bash: git status',
+    'full_command': 'git status',
+    'rejected': False,
+    'auto_allowed': False,
+    'risk': 'read-only',
+    'timestamp': '',
+    '_has_secrets': False,
+    '_secret_category': None,
+    '_exposure_risk': None,
+    '_input_target': 'git status',
+    '_result_bytes': 0,
+    '_turn_uuid': 'x',
+    '_turn_index': 0,
+    '_result_tokens_est': 0,
+    '_token_estimate_method': 'char_div_4',
+    '_next_turn_output_tokens': 0,
+}
+_buf = _io6.StringIO()
+_old_stdout = sys.stdout
+sys.stdout = _buf
+try:
+    report.render_why('git status', [_rec])
+finally:
+    sys.stdout = _old_stdout
+_out = _buf.getvalue()
+# Pre-fix the output had two lines starting with "Auto-allowed:" — historical
+# counts and per-project status — which is ambiguous. After fix, the second
+# uses an unambiguous label.
+_auto_allowed_count = _out.count('Auto-allowed:')
+check(_auto_allowed_count <= 1,
+      f"'Auto-allowed:' appears at most once (got {_auto_allowed_count})")
+check('llowlist' in _out or 'currently allowed' in _out.lower(),
+      f"output mentions allowlist status with clearer label "
+      f"(snippet={_out[:200]!r})")
+
+
+print("\n=== Phase 6: L11 --help mentions env-var overrides ===")
+_help_proc = _sub.run(['python3', _SCRIPT, '--help'],
+                      capture_output=True, text=True, timeout=10)
+_help_text = _help_proc.stdout + _help_proc.stderr
+for _var in ('HOOK_AUDIT', 'HOOK_DEBUG', 'AUTOCLAUDE_MAX_SESSION_MB'):
+    check(_var in _help_text,
+          f"--help mentions {_var}")
+
+
+print("\n=== Phase 6: L12 --auto downgrade prints stderr warning ===")
+# --apply mutating --auto silently downgrades to read-only today; should
+# warn so the user knows the intent wasn't fully honored. Use a temp HOME
+# so the live-session scan is empty and the command returns fast.
+with _tf.TemporaryDirectory() as _empty_home:
+    os.makedirs(os.path.join(_empty_home, '.claude', 'projects'), exist_ok=True)
+    _env = os.environ.copy()
+    _env['HOME'] = _empty_home
+    _proc = _sub.run(
+        ['python3', _SCRIPT, '--apply', 'mutating', '--auto', '--dry-run'],
+        capture_output=True, text=True, timeout=15, env=_env,
+    )
+    _combined = _proc.stdout + _proc.stderr
+    check('downgrad' in _combined.lower() or
+          ('--auto' in _combined.lower() and 'read-only' in _combined.lower()),
+          f"--apply mutating --auto warns about downgrade "
+          f"(combined={_combined.strip()[:200]!r})")
 
 
 # =============================================================================

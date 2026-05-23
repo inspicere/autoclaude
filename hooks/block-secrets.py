@@ -55,6 +55,17 @@ def _audit_log(decision, tool_name, summary="", reason="", command="",
     """Append a structured JSON record to the audit log."""
     if not _AUDIT:
         return
+    # First-run hint: when the audit log doesn't exist yet, print a one-time
+    # stderr note so the user discovers that HOOK_AUDIT=1 is the default and
+    # how to opt out. The check is racy under parallel hooks; a duplicate
+    # hint is harmless.
+    if not os.path.exists(_AUDIT_LOG):
+        print(
+            "[autoclaude] HOOK_AUDIT=1 enabled by default — Bash commands "
+            "are captured (redacted) to ~/.claude/hook-audit.jsonl. See "
+            "docs/hooks.md#audit-log for details. Set HOOK_AUDIT=0 to disable.",
+            file=sys.stderr,
+        )
     if command:
         command = _redact(command)
         command = command[:500 if decision != "block" else 200]
@@ -191,6 +202,7 @@ _GREP_FAMILY = frozenset({
 _SENSITIVE_PATH_RE = re.compile(
     r'(?:'
     r'(?:^|/)\.env(?:\.\w+)?$'
+    r'|(?:^|/)\.envrc$'
     r'|(?:^|/)\.dev\.vars(?:\.\w+)?$'
     r'|(?:^|/)\.?\w[\w.\-]*\.(?:pem|key|p12|pfx)$'
     r'|(?:^|/)\.aws/'

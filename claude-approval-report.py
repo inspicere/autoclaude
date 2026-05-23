@@ -11,6 +11,7 @@ import json
 import math
 import os
 import re
+import stat
 import subprocess
 import tempfile
 import time
@@ -1479,6 +1480,28 @@ def find_resummarized_outputs(records, min_bytes=8000, max_narrow_ratio=0.25,
 _STABILITY_GIT_TIMEOUT_SECONDS = 2
 _STABILITY_DEFAULT_SINCE_DAYS = 180
 
+# Total wall-clock budget for git-log stability lookups across one CLI run.
+# Each call has its own 2-second subprocess timeout, but on slow filesystems
+# the cumulative cost across many findings can dominate. Once the budget
+# is exhausted, subsequent calls short-circuit to None and the caller falls
+# back to the default stability factor (0.7).
+_STABILITY_TOTAL_BUDGET_SECONDS = 30
+_stability_budget_used = 0.0
+_stability_budget_exhausted_warned = False
+
+
+def _reset_stability_budget():
+    """Reset the wall-clock budget. Used by tests and one-shot reuse."""
+    global _stability_budget_used, _stability_budget_exhausted_warned
+    _stability_budget_used = 0.0
+    _stability_budget_exhausted_warned = False
+
+
+def _set_stability_budget_used(seconds):
+    """Pin the consumed counter — test hook for budget-exhaustion paths."""
+    global _stability_budget_used
+    _stability_budget_used = float(seconds)
+
 
 def _resolve_target_path(target):
     """Map a finding target to an absolute filesystem path, or None.
@@ -1498,15 +1521,28 @@ def _resolve_target_path(target):
 def _git_commit_count(abs_path, since_days=_STABILITY_DEFAULT_SINCE_DAYS):
     """Count commits touching `abs_path` in the last `since_days` days.
 
-    Returns None when git is unavailable, the path is not in a git repo, or
-    the subprocess times out. Cached per-process via lru_cache so repeated
-    findings against the same path don't fork git multiple times.
+    Returns None when git is unavailable, the path is not in a git repo, the
+    subprocess times out, or the per-run wall-clock budget is exhausted.
+    Cached per-process via lru_cache so repeated findings against the same
+    path don't fork git multiple times.
     """
+    global _stability_budget_used, _stability_budget_exhausted_warned
     if not abs_path:
+        return None
+    if _stability_budget_used >= _STABILITY_TOTAL_BUDGET_SECONDS:
+        if not _stability_budget_exhausted_warned:
+            print(
+                f"Warning: git-log stability budget "
+                f"({_STABILITY_TOTAL_BUDGET_SECONDS}s) exhausted; remaining "
+                f"findings will use the default stability factor.",
+                file=sys.stderr,
+            )
+            _stability_budget_exhausted_warned = True
         return None
     parent = os.path.dirname(abs_path)
     if not parent or not os.path.isdir(parent):
         parent = "."
+    t0 = time.monotonic()
     try:
         result = subprocess.run(
             ["git", "log", "--follow", f"--since={since_days} days ago",
@@ -1516,7 +1552,9 @@ def _git_commit_count(abs_path, since_days=_STABILITY_DEFAULT_SINCE_DAYS):
             timeout=_STABILITY_GIT_TIMEOUT_SECONDS,
         )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        _stability_budget_used += time.monotonic() - t0
         return None
+    _stability_budget_used += time.monotonic() - t0
     if result.returncode != 0:
         return None
     return sum(1 for line in result.stdout.splitlines() if line.strip())
@@ -2081,16 +2119,26 @@ def _atomic_write(out_path, write_fn, mode=0o644):
 
 
 def _write_settings(path, settings, dry_run):
-    """Write settings JSON to path unless dry_run."""
+    """Write settings JSON to path unless dry_run.
+
+    Preserves the existing file mode if the file is already present so a
+    user's chosen permissions (typical Claude Code default: 0o644) survive
+    an `--apply` run. New files default to 0o600 — settings.local.json
+    is per-user state, owner-only is the right floor.
+    """
     if dry_run:
         return
     if not path.parent.exists():
         print(f"    Skipping: {path.parent} does not exist", file=sys.stderr)
         return
+    try:
+        mode = stat.S_IMODE(os.stat(path).st_mode)
+    except (FileNotFoundError, OSError):
+        mode = 0o600
     def _do_write(f):
         json.dump(settings, f, indent=2)
         f.write("\n")
-    _atomic_write(path, _do_write, mode=0o600)
+    _atomic_write(path, _do_write, mode=mode)
 
 
 def _load_settings(path):
@@ -3153,7 +3201,9 @@ def render_why(query, all_records):
             status_parts.append(f"YES in {pname} ({matching_pattern})")
         else:
             status_parts.append(f"NO in {pname}")
-    print(f"  Auto-allowed: {', '.join(status_parts)}")
+    # Was 'Auto-allowed:' — collided with the prior line's same label that
+    # reports historical counts. Use an unambiguous label for current state.
+    print(f"  Currently in allowlist: {', '.join(status_parts)}")
 
     pattern = suggest_pattern(top_display)
     print(f"  To auto-allow: {pattern}")
@@ -3204,6 +3254,12 @@ def main():
             "  %(prog)s --token-report          token-consumption optimization report\n"
             "  %(prog)s --apply --dry-run       preview allowlist changes\n"
             "  %(prog)s --generate-settings     deny rules + hook config\n"
+            "\n"
+            "env vars:\n"
+            "  AUTOCLAUDE_MAX_SESSION_MB  per-file JSONL ingest cap (default: 100; set 0 to disable)\n"
+            "  HOOK_AUDIT                 PreToolUse hook audit log (1/true/yes/on; default: 1)\n"
+            "  HOOK_DEBUG                 PreToolUse hook stderr trace (1/true/yes/on; default: 0)\n"
+            "  HOOK_CORRELATE             PostToolUse pre-to-post warn correlation (default: 1)\n"
             "\n"
             "full reference: docs/cli-reference.md"
         ),
@@ -3388,6 +3444,17 @@ def main():
              "Warning/Error messages still surface.",
     )
     args = parser.parse_args()
+
+    # Surface the --apply mutating --auto silent downgrade so the user knows
+    # their stated intent wasn't fully honored. Print before any data load
+    # so an empty-session early-exit still shows the warning.
+    if args.apply is not None and args.auto and args.apply != "read-only":
+        print(
+            f"Warning: --auto forces risk level to read-only; "
+            f"ignoring --apply {args.apply}. Use without --auto and "
+            f"confirm interactively to apply non-read-only patterns.",
+            file=sys.stderr,
+        )
 
     trend_window = args.trend if args.trend is not None else None
     if trend_window and _is_duration(trend_window):

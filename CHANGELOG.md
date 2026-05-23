@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.1] — 2026-05-22
+
+Patch release: closes two remaining Mediums (M7, M8), one Medium perf safeguard (2.3 deferred from v1.2.0), and the audit's Low bundle (L2, L10, L11, L12). Audit Medium 2.1 (realpath pre-filter) remains deferred pending measured perf data — it carries a symlink-coverage tradeoff worth its own ship. M2 (cross-project transcript reads) also deferred — it's a feature change worth its own ship.
+
+### Security / Reliability
+
+- **M7 — first-run audit-log hint** (audit 2026-05-22 Medium). The hook now prints a one-time stderr note when `~/.claude/hook-audit.jsonl` doesn't exist yet, telling the user `HOOK_AUDIT=1` is the default and pointing at `docs/hooks.md#audit-log` for opt-out instructions. Subsequent calls find the file present and skip the hint. Suppressed entirely when `HOOK_AUDIT=0`.
+
+- **M8 — `_write_settings` preserves existing file mode** (audit 2026-05-22 Medium). `--apply` previously force-wrote `settings.local.json` with mode `0o600`, silently tightening permissions on files Claude Code created at `0o644`. The function now `os.stat`s the existing file, preserves its mode, and falls back to `0o600` only for new files. `import stat` added to the report script.
+
+- **2.3 — wall-clock budget on `_git_commit_count` stability lookups** (audit 2026-05-22 Medium). Each call already had a 2-second subprocess timeout, but the cumulative cost across many findings could dominate `--token-report` runs on slow filesystems. New `_STABILITY_TOTAL_BUDGET_SECONDS = 30` cap: once exhausted, subsequent calls short-circuit to `None` (caller falls back to the default 0.7 stability factor) and a one-time stderr warning fires. Test hooks `_reset_stability_budget()` and `_set_stability_budget_used()` exposed for testability.
+
+- **L2 — `.envrc` covered by `_SENSITIVE_PATH_RE`** (audit 2026-05-22 Low). direnv config files can contain literal `export FOO=secret`; same coverage as `.env*` now applies. Added in both `hooks/block-secrets.py` and `hooks/landlock-sandbox.py` so the pattern-sync CI gate stays green. `.envrc.example`, `.envrc.sample`, `.envrc.template`, and `.envrcfile` (no boundary) remain allowed.
+
+### UX / Documentation
+
+- **L10 — `--why` output uses unambiguous "Currently in allowlist:" label** (audit 2026-05-22 Low). The previous output had two lines starting with `Auto-allowed:` — one historical count, one current per-project status — which read as the same field. Renamed the second to `Currently in allowlist:`.
+
+- **L11 — `--help` epilog lists env-var overrides** (audit 2026-05-22 Low). `AUTOCLAUDE_MAX_SESSION_MB`, `HOOK_AUDIT`, `HOOK_DEBUG`, `HOOK_CORRELATE` previously discoverable only by reading the README. Now appear directly in `--help`.
+
+- **L12 — `--apply mutating --auto` prints a stderr downgrade warning** (audit 2026-05-22 Low). Previously the script silently downgraded to read-only. Now emits a clear warning telling the user to re-run without `--auto` and confirm interactively if they want mutating patterns applied. Warning prints before any data load so empty-session early-exits still surface it.
+
+### Tests
+
+- **1262 tests across 18 suites** (was 1233/17). New `hooks/test_phase6_audit_fixes.py` (17 cases: 8 for L2, 3 for M7, 4 regression cases). 12 new assertions in `tests/test_report.py` covering the report-script items (2.3 budget, M8 mode preservation, L10 label, L11 env-var list, L12 downgrade warning). Written failing-first; baseline failures matched the audit predictions.
+
+- **Bonus flake fix:** the live-data `--summary --quiet` test in `tests/test_report.py` had `timeout=30` and was hitting it intermittently as the session corpus grew (~29.7s real time). Bumped to 90s.
+
+### Deferred (still open)
+
+- **2.1** realpath pre-filter on hook critical path — keeps symlink-to-sensitive detection intact at the cost of perf when `~/` is on a slow mount. Revisit once we have a benchmark showing measurable hook latency in real sessions.
+- **M2** cross-project transcript reads — `--no-cross-project` flag would constrain `claude-approval-report.py`'s default scan to the current project; behavioural change worth its own ship.
+
 ## [1.2.0] — 2026-05-22
 
 Minor release: closes 2026-05-22 audit H2 (silently-ignored PostToolUse output) plus three Medium/Low items and the v1.1.2-discovered #758 follow-up.
