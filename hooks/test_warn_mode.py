@@ -167,6 +167,14 @@ confidence_tests = [
     ("output to /dev/null is low confidence",
      'SECRET_TOKEN=$(vault kv get secret/x) && curl -o /dev/null -H "Auth: $SECRET_TOKEN" http://x',
      "may expose"),
+    # issue #2: a benign echo of a literal string must not bump an
+    # otherwise-low auth-header warn to "likely to expose".
+    ("echo of a literal label does not raise confidence",
+     'echo "=== latest scan runs ===" ; curl -s -H "Authorization: token $FORGEJO_TOKEN" http://x/api',
+     "may expose"),
+    ("printf of a literal does not raise confidence",
+     'printf "fetching\\n" ; curl -s -H "Authorization: token $API_TOKEN" http://x/api',
+     "may expose"),
 ]
 
 for desc, cmd, expected_phrase in confidence_tests:

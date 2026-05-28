@@ -477,8 +477,12 @@ def _classify_leak_confidence(command):
     sent in a request header without verbose output).
     """
     lower = command.lower()
-    if re.search(r'\becho\b|\bprintf\b', lower):
-        return "high"
+    # echo/printf only risks exposing a secret if it prints an expanded value
+    # ($VAR, ${...}, $(...), or a backtick) — printing a bare literal string
+    # (e.g. `echo "=== runs ==="`) is harmless and must not raise confidence.
+    for m in re.finditer(r'\b(?:echo|printf)\b([^;|&\n]*)', lower):
+        if re.search(r'\$\w|\$\{|\$\(|`', m.group(1)):
+            return "high"
     # Verbose flags route request/response details (including auth headers)
     # to stderr. With 2>&1 they land in the transcript; even without, they
     # appear in the user's interactive view. `\b--verbose\b` does NOT match
@@ -961,7 +965,10 @@ def _strip_wrappers(parts):
 
 def _check_sensitive_paths_in_text(text):
     """Scan arbitrary text for sensitive file paths. Returns first match or None."""
-    for m in re.finditer(r'[/~.][\w./_-]+', text):
+    # `/` and `~` always start a path token. A `.`-led token only starts at a
+    # path boundary — not in the middle of an identifier — so a `.env` property
+    # segment (e.g. process.env.X, foo.env) is not mistaken for a dotfile path.
+    for m in re.finditer(r'(?:[/~]|(?<![\w.])\.)[\w./_-]+', text):
         token = m.group()
         # Skip bare dotfile names (no path separator) that are quoted —
         # these are likely string comparisons, not file operations.

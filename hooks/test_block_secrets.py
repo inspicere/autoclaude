@@ -102,6 +102,15 @@ def main():
     results.append(bash(f'python3 -c "open(\'~/.env\').read()"', True))
     results.append(bash(f'python3 -c "open(\'{HOME}/.env\').read()"', True))
 
+    print('\n=== process.env property access is not a .env file read (issue #1) ===')
+    # `.env` carved out of the middle of an identifier (process.env.X) is a
+    # property access on an in-memory object, not a dotfile path.
+    results.append(bash('node -e "const t = process.env.FORGEJO_TOKEN"', False))
+    results.append(bash("node -e \"const t = process.env['DB_SECRET']\"", False))
+    results.append(bash('python3 -c "x = process.env.SOME_VAR"', False))
+    # Regression: a genuine .env read in an interpreter script still blocks
+    results.append(bash("node -e \"require('fs').readFileSync('config/.env')\"", True))
+
     print('\n=== REGRESSION: Legitimate operations still allowed ===')
     results.append(bash('ls -la', False))
     results.append(bash('git status', False))

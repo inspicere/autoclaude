@@ -72,7 +72,7 @@ The hook covers gaps that deny rules cannot:
 
 Operational features: `HOOK_DEBUG=1` emits debug trace to stderr (tool routing, pattern matches, entropy scores, sensitive path checks). Audit logging is enabled by default (`HOOK_AUDIT=1`) and writes structured JSONL records to `~/.claude/hook-audit.jsonl` (timestamp, decision, tool, summary, reason, command). Set `HOOK_AUDIT=0` to disable. Debug is zero-cost when disabled. Fail-closed design: unknown tool types are blocked, malformed input is blocked. The `--warns` flag on the report script cross-references audit warn events with session data to show user approval decisions.
 
-Warn-level confidence grading: `_classify_leak_confidence()` estimates whether a runtime-expanded secret is likely to appear in output. Commands with `echo`/`printf` get "high" confidence ("likely to expose"), while auth headers, password flags, and commands with `/dev/null` suppression get "low" ("may expose"). Confidence is recorded in the audit log for PostToolUse correlation.
+Warn-level confidence grading: `_classify_leak_confidence()` estimates whether a runtime-expanded secret is likely to appear in output. Commands that print an expanded value (`echo`/`printf` whose argument contains `$VAR`/`${...}`/`$(...)`/backtick, verbose flags, or `2>&1`) get "high" confidence ("likely to expose"); a bare-literal `echo`/`printf`, auth headers, password flags, and commands with `/dev/null` suppression get "low" ("may expose"). Confidence is recorded in the audit log for PostToolUse correlation.
 
 ## PostToolUse hook (`hooks/warn-secrets-output.py`)
 
