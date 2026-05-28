@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+False-positive / usability fixes to the secret-detection hook and report (2026-05-28). Two Forgejo issues (#1, #2) filed with repro/root-cause/fix and closed in `aaa442a`.
+
+### Fixed
+
+- **Env-read secret assignments warn instead of block; report classifies them false-positive** (commit `47d1347`, 2026-05-28). A secret-named variable assigned directly from an environment read — `os.environ["X"]`, `os.environ.get("X")`, `os.getenv("X")`, Node `process.env.X` / `process.env["X"]` — puts no literal secret in the command text. New `_RE_ENV_READ_VALUE` in `hooks/block-secrets.py` now returns warn (`permissionDecision: "ask"`) instead of hard-block at the secret-assignment check; the identical regex in `claude-approval-report.py` makes `_classify_exposure_risk` classify these as `false-positive` ("no literal secret") so they drop out of the Sec count. The regex is anchored end-to-end, so a literal welded onto an env read (e.g. `os.getenv("X")or"..."`) does NOT match and still blocks / counts as exposed. (Started as `os.environ`/`os.getenv` only, then extended to `process.env`.)
+
+- **#1 — `.env` no longer carved out of the middle of `process.env`** (commit `aaa442a`, 2026-05-28). `_check_sensitive_paths_in_text`'s path-token regex `[/~.][\w./_-]+` matched `.env` inside identifiers like `process.env.X`, flagging Node property access as a sensitive `.env` file read inside interpreter inline scripts (`node -e`, `python3 -c`). A `.`-led token now only starts at a path boundary via negative lookbehind — `(?:[/~]|(?<![\w.])\.)[\w./_-]+`. `/` and `~` starts are unchanged, so genuine reads (`cat .env`, `~/.env`, `config/.env`) still block. Closes Forgejo #1.
+
+- **#2 — echo/printf leak confidence gated on expanded values** (commit `aaa442a`, 2026-05-28). `_classify_leak_confidence` returned "high" ("likely to expose") on any `echo`/`printf`, over-grading a benign label print (`echo "=== runs ==="`) next to a silent auth-header curl. "high" now requires the echo/printf argument to contain `$VAR` / `${...}` / `$(...)` / backtick; bare-literal prints stay "low" ("may expose"). Closes Forgejo #2.
+
+### Tests
+
+- **1299 tests across 19 suites** (was 1284 at the start of the session). `47d1347` adds 2 hook warn-mode cases (`hooks/test_warn_mode.py`) + 7 report classification cases (`tests/test_report.py`, incl. bypass guards). `aaa442a` adds 4 block tests (`hooks/test_block_secrets.py`: `process.env` → allow, real `.env` still blocks) + 2 confidence cases (`hooks/test_warn_mode.py`). Token pattern-sync 10/10 (`_RE_SECRET_ASSIGN` unchanged).
+
+### Docs
+
+- `docs/hooks.md` (warn-mode + false-positive lists) updated in `47d1347`; `CLAUDE.md` confidence-grading description updated in `aaa442a`.
+
 ## [1.2.2] — 2026-05-22
 
 Patch release: closes audit Medium M2 (cross-project transcript reads) and four remaining Lows. After this ship the audit's actionable items are down to one deferred Medium (2.1 realpath pre-filter) and a small tail of accept-as-is observations.
