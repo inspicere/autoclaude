@@ -179,6 +179,23 @@ _RE_SECRET_ASSIGN = re.compile(
     re.IGNORECASE,
 )
 
+# A secret-named variable assigned *directly* from an environment read is the
+# safe pattern the hook wants to encourage — the value is pulled from the
+# process environment at runtime and never appears in the command text.
+# Matched values must be a clean env read end-to-end (anchored): a literal
+# concatenated onto the read (e.g. os.getenv("X")or"secret") fails to match and
+# falls through to the literal-secret block branch.
+_RE_ENV_READ_VALUE = re.compile(
+    r'''^(?:
+          os\.environ\[\s*(?:"[^"]*"|'[^']*')\s*\]          # os.environ["X"]
+        | os\.environ\.get\(\s*(?:"[^"]*"|'[^']*')\s*\)     # os.environ.get("X")
+        | os\.getenv\(\s*(?:"[^"]*"|'[^']*')\s*\)           # os.getenv("X")
+        | process\.env\.[A-Za-z_$][\w$]*                    # process.env.X (Node)
+        | process\.env\[\s*(?:"[^"]*"|'[^']*')\s*\]         # process.env["X"] (Node)
+      )$''',
+    re.VERBOSE,
+)
+
 _RE_HIGH_ENTROPY = re.compile(r'^[A-Za-z0-9+/=]+$')
 
 _SAFE_PLACEHOLDERS = frozenset({
@@ -553,6 +570,8 @@ def _check_command_secrets(command):
             return (f"{m.group(1)} will be set from a secret source at runtime", "warn")
         elif val.startswith('$') and len(val) > 1:
             return (f"{m.group(1)} will expand a secret variable at runtime", "warn")
+        elif _RE_ENV_READ_VALUE.match(val):
+            return (f"{m.group(1)} will be read from the environment at runtime", "warn")
         elif (len(val) > 8
                 and not val.startswith(('{', 'http://', 'https://', '/'))
                 and val.lower() not in _SAFE_PLACEHOLDERS):

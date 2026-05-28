@@ -31,6 +31,25 @@ tests = [
      'mysql --password=$DB_PASS -u admin mydb',
      "ask"),
 
+    # Reading from the environment is the safe pattern → warn, not block.
+    # The value never appears in the command text; it is pulled from the
+    # process environment at runtime, so it is at least as safe as $VAR.
+    ("TOKEN read from os.environ[...]",
+     'export TOKEN=os.environ["FORGEJO_TOKEN"]',
+     "ask"),
+    ("API_KEY read from os.getenv(...)",
+     'export API_KEY=os.getenv("OPENAI_API_KEY")',
+     "ask"),
+    ("SECRET read from os.environ.get(...)",
+     "export DB_SECRET=os.environ.get('DB_SECRET')",
+     "ask"),
+    ("TOKEN read from process.env.X (Node)",
+     'const API_TOKEN=process.env.FORGEJO_TOKEN',
+     "ask"),
+    ("SECRET read from process.env[...] (Node)",
+     'DB_SECRET=process.env["DB_SECRET"]',
+     "ask"),
+
     # Hard blocks (literal secrets in command text)
     ("literal secret in API_KEY var",
      'FAKE_API_KEY=abc123def456ghi789 uv run python',
@@ -46,6 +65,15 @@ tests = [
      "block"),
     ("testsaslauthd -p literal in ssh",
      "ssh 192.168.86.137 'sudo testsaslauthd -u health -p secretpass123 -s smtp'",
+     "block"),
+
+    # The env-read carve-out must not become a bypass: a literal concatenated
+    # onto an env read (no whitespace, so it survives \\S+ capture) still blocks.
+    ("os.getenv concatenated with literal still blocks",
+     'export TOKEN=os.getenv("X")or"abcdefghijklmnop"',
+     "block"),
+    ("os.environ concatenated with literal still blocks",
+     'export TOKEN=os.environ["X"]+"abcdefghijklmnop"',
      "block"),
 
     # Safe commands (should pass through, no block or warn)

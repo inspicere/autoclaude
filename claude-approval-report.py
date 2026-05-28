@@ -63,6 +63,22 @@ _RE_SECRET_ASSIGN = re.compile(
     re.IGNORECASE,
 )
 
+# A secret-named variable assigned *directly* from an environment read puts no
+# literal secret in the command text — the value is pulled from the process
+# environment at runtime. Anchored end-to-end so a literal welded onto the read
+# (e.g. os.getenv("X")or"...") does not match and is still treated as exposed.
+# Kept identical to the same-named pattern in hooks/block-secrets.py.
+_RE_ENV_READ_VALUE = re.compile(
+    r'''^(?:
+          os\.environ\[\s*(?:"[^"]*"|'[^']*')\s*\]          # os.environ["X"]
+        | os\.environ\.get\(\s*(?:"[^"]*"|'[^']*')\s*\)     # os.environ.get("X")
+        | os\.getenv\(\s*(?:"[^"]*"|'[^']*')\s*\)           # os.getenv("X")
+        | process\.env\.[A-Za-z_$][\w$]*                    # process.env.X (Node)
+        | process\.env\[\s*(?:"[^"]*"|'[^']*')\s*\]         # process.env["X"] (Node)
+      )$''',
+    re.VERBOSE,
+)
+
 # Tokens with unique prefixes — zero false positives, no entropy check needed
 _PREFIXED_TOKEN_PATTERNS = re.compile(
     r'(?:'
@@ -1809,6 +1825,8 @@ def _classify_exposure_risk(cmd, category):
                 return ("runtime", f"{var_name} set from subshell — may appear in output")
             if val.startswith('$') or val.startswith('${'):
                 return ("variable", f"{var_name} set from variable {val}")
+            if _RE_ENV_READ_VALUE.match(val):
+                return ("false-positive", f"{var_name} read from the environment (no literal secret)")
             return ("exposed", f"Literal value assigned to {var_name}")
         return ("exposed", "Secret assignment with literal value")
 

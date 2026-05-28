@@ -64,6 +64,7 @@ The report script's `--secrets` mode classifies flagged commands through `_class
 - Git object hashes (7-40 hex chars in git commands)
 - SSH public keys (`ssh-ed25519 AAAA...`)
 - Non-secret variable assignments (`GIT_AUTHOR_NAME`, `HOME`, `PATH`, etc.)
+- Environment reads assigned to a secret-named variable (`TOKEN=os.environ["X"]`, `os.getenv("X")`, `process.env.X`) — no literal secret in the command text
 - Git ref paths (`refs/original/`, `refs/heads/`)
 - Test/dummy Basic auth credentials (base64-decoded value contains `test`, `dummy`, `wrong`, `changeme`)
 - Test payload patterns (`json.dumps`, `tool_result`, `echo ... tool_name`)
@@ -124,6 +125,7 @@ Audit log: structured JSONL with timestamp, decision, tool, summary, reason, com
 Some commands get `decision: "warn"` instead of block. The user sees a warning but can still approve. This applies to:
 
 - Secret variable assignments where the value comes from a subshell (`TOKEN=$(vault kv get ...)`)
+- Secret variable assignments that read directly from the environment (`os.environ["X"]`, `os.environ.get("X")`, `os.getenv("X")`, Node `process.env.X` / `process.env["X"]`) — the value never appears in the command text. A literal concatenated onto the read (e.g. `os.getenv("X")or"..."`) does not match and still blocks.
 - Password flags (`-p`) on commands like `mysql`, `htpasswd`
 - Commands where the secret reference is indirect but suspicious
 

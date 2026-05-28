@@ -96,6 +96,27 @@ check(not report._cmd_has_secrets("export API_KEY=$VAULT_TOKEN"), "variable refe
 
 
 # =============================================================================
+# _classify_exposure_risk — env reads contain no literal secret (false-positive)
+# =============================================================================
+print("\n=== _classify_exposure_risk (env reads) ===")
+check(report._classify_exposure_risk('export TOKEN=os.environ["FORGEJO_TOKEN"]', "secret_assign")[0] == "false-positive",
+      "os.environ read classified false-positive")
+check(report._classify_exposure_risk('export API_KEY=os.getenv("OPENAI_API_KEY")', "secret_assign")[0] == "false-positive",
+      "os.getenv read classified false-positive")
+check(report._classify_exposure_risk("export DB_SECRET=os.environ.get('DB_SECRET')", "secret_assign")[0] == "false-positive",
+      "os.environ.get read classified false-positive")
+check(report._classify_exposure_risk('const API_TOKEN=process.env.FORGEJO_TOKEN', "secret_assign")[0] == "false-positive",
+      "process.env read classified false-positive")
+check(report._classify_exposure_risk('DB_SECRET=process.env["DB_SECRET"]', "secret_assign")[0] == "false-positive",
+      "process.env[...] read classified false-positive")
+# Guards: a literal welded onto an env read, or a plain literal, still exposed
+check(report._classify_exposure_risk('export TOKEN=os.getenv("X")or"abcdef1234567890"', "secret_assign")[0] == "exposed",
+      "env read + concatenated literal still exposed")
+check(report._classify_exposure_risk("export API_KEY=realsecretvalue123", "secret_assign")[0] == "exposed",
+      "plain literal still exposed")
+
+
+# =============================================================================
 # M1 (2026-05-16 audit): _RE_SECRET_ASSIGN captures quoted values with spaces
 # =============================================================================
 print("\n=== _RE_SECRET_ASSIGN quoted-value capture (M1) ===")
