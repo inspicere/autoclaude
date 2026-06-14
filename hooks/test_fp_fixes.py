@@ -88,6 +88,27 @@ test_hook('Bash', {'command': 'cat /etc/ssl/private/server.key'}, True, 'real /e
 test_hook('Bash', {'command': 'cat ./mycert.key'}, True, 'real ./mycert.key read (still blocks)')
 test_hook('Bash', {'command': 'cat ~/.ssh/foo.pem'}, True, 'real ~/.ssh/foo.pem read (still blocks)')
 
+print("\n=== FP-FIX 4: high-entropy benign tokens (Vikunja #758 — entropy over-reach) ===")
+# The base64 entropy gate must not flag pure-alphabetic source identifiers
+# (camelCase/PascalCase) or pure-hex git/sha digests. Strings are assembled at
+# runtime so this test file holds no literal high-entropy blob.
+import hashlib as _hl
+_ident = "Android" + "Db" + "Passphrase" + "Provider" + "Factory"      # 34 chars, pure alpha
+_sha256 = _hl.sha256(b"autoclaude").hexdigest()                        # 64 hex
+_commit = _sha256[:40]                                                 # 40 hex
+_realb64 = "aB3dE5fG7hJ9" + "kL1mN2pQ4rS6" + "tU8vW0xYzA12" + "cd34qZ"  # base64-shaped, has digits
+
+# Bug A residual — >=32-char PascalCase identifier in a non-exempt command must NOT block
+test_hook('Bash', {'command': f'echo {_ident}'}, False, 'echo >=32 PascalCase identifier (no block)')
+test_hook('Bash', {'command': f'echo {_ident}Repository'}, False, 'echo longer PascalCase identifier (no block)')
+# Bug B — git/sha hex digests must NOT block
+test_hook('Bash', {'command': f'git checkout {_commit}'}, False, 'git checkout 40-hex commit (no block)')
+test_hook('Bash', {'command': f'git show {_sha256}'}, False, 'git show 64-hex sha256 (no block)')
+test_hook('Bash', {'command': f'echo {_sha256} >> notes.txt'}, False, 'echo 64-hex sha256 (no block)')
+# Positive controls — a real high-entropy base64 blob (mixed alnum) must STILL block
+test_hook('Bash', {'command': f'echo {_realb64}'}, True, 'bare base64-shaped blob w/ digits still blocks (entropy path)')
+test_hook('Bash', {'command': f'export API_KEY={_realb64}'}, True, 'real API_KEY= assignment still blocks')
+
 print(f"\n{'='*60}")
 print(f"Results: {results['pass']} passed, {results['fail']} failed")
 if results['fail'] > 0:

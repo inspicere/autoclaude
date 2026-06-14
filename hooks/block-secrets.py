@@ -197,6 +197,24 @@ _RE_ENV_READ_VALUE = re.compile(
 )
 
 _RE_HIGH_ENTROPY = re.compile(r'^[A-Za-z0-9+/=]+$')
+_RE_HEX = re.compile(r'^[0-9a-fA-F]+$')
+
+
+def _is_benign_high_entropy(s):
+    """True if a >=32-char [A-Za-z0-9+/=] run is a benign source token, not a secret.
+
+    Two classes trip the base64 entropy gate but are never secrets (Vikunja #758):
+    - Pure-alphabetic identifiers (camelCase/PascalCase source symbols, e.g.
+      ``AndroidDbPassphraseProviderFactory``). Real base64 secrets contain digits
+      and/or ``+`` ``/`` ``=``; an all-letter run is a code identifier.
+    - Pure-hex digests of git/sha lengths (40 = sha1 / git commit, 64 = sha256).
+      Narrow on length so ordinary hex secrets are still entropy-checked.
+    """
+    if s.isalpha():
+        return True
+    if len(s) in (40, 64) and _RE_HEX.match(s):
+        return True
+    return False
 
 _SAFE_PLACEHOLDERS = frozenset({
     'changeme', 'password', 'placeholder', 'example',
@@ -617,6 +635,8 @@ def _check_command_secrets(command):
             if clean.startswith(('/', '.', '~', '-', '$', '{', '(')):
                 continue
             if len(clean) >= 32 and _RE_HIGH_ENTROPY.match(clean):
+                if _is_benign_high_entropy(clean):
+                    continue
                 ent = _shannon_entropy(clean)
                 _debug(f"entropy check: len={len(clean)} score={ent:.2f}")
                 if ent >= 3.5:

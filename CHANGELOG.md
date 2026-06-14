@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Entropy-gate false-positive fix (2026-06-14). Triaged a reported `block-secrets.py` FP (Vikunja #758): the camelCase/grep cases as literally reported were already non-blocking (grep-family exempt + the `len >= 32` gate), but the underlying entropy over-reach was still live for long identifiers and git/sha hashes.
+
+### Fixed
+
+- **High-entropy benign tokens no longer hard-block** (`hooks/block-secrets.py`). The base64 entropy gate (`_check_command_secrets`, `len >= 32` + `[A-Za-z0-9+/=]`) flagged two non-secret classes: pure-alphabetic source identifiers (camelCase/PascalCase, e.g. `AndroidDbPassphraseProviderFactory`) and pure-hex git/sha digests (`git checkout <40-hex>`, `git show <64-hex sha256>`). New `_is_benign_high_entropy()` exempts a run that is all-alphabetic (real base64 secrets contain digits and/or `+`/`/`/`=`) or pure hex of digest length (40 = sha1/git commit, 64 = sha256 — narrow on length so ordinary hex secrets are still entropy-checked). A real base64-shaped blob with digits, and secret-named assignments, still block. Closes the open item in SilverBullet `1-Projects/Autoclaude/Block-Secrets False Positives`; also retires the related 2026-05-31 heredoc-hash FP.
+
+### Tests
+
+- **1345 tests across 19 suites** (was 1338). `hooks/test_fp_fixes.py` adds FP-FIX 4 (7 cases: 2 PascalCase + 3 git/sha + 2 positive controls), assembled at runtime so the file holds no literal high-entropy blob. Token pattern-sync 10/10.
+
+---
+
 Risk-classifier command-runner handling (2026-06-13). Two Forgejo issues (#3, #4) closed: `classify_risk` now sees through `source` / `timeout` / env-prefix wrappers, and a residual grep false-positive surfaced while finishing them is fixed.
 
 ### Fixed
