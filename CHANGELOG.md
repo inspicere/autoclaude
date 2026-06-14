@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Risk-classifier command-runner handling (2026-06-13). Two Forgejo issues (#3, #4) closed: `classify_risk` now sees through `source` / `timeout` / env-prefix wrappers, and a residual grep false-positive surfaced while finishing them is fixed.
+
+### Fixed
+
+- **#3 — `source` and `timeout` classified by their underlying command.** `classify_risk` returned `unknown` for `source …` (193 calls/7d) and `timeout …` (25 calls/7d) — together ~64% of the `unknown` bucket. `_classify_bash` now recurses through both: `source X && Y` / `timeout [opts] DUR CMD` dispatch to the delegated command (`_classify_source_chain`, `_classify_timeout` + extracted `_timeout_cmd_index`). `normalize_command` peels the same wrappers via `_runner_inner_command`, so the suggestion table attributes to the real command (`python`, `semgrep`, `pytest`) instead of recommending `Bash(source *)` / `Bash(timeout *)`. Closes Forgejo #3.
+
+- **#4 — env-prefix stripper no longer over-strips `$(…)` / trailing `\`.** `_RE_ENV_PREFIX` tries subshell/backtick/brace value forms before the bare-`\S+` fallback, so `TOKEN=$(vault kv get …) curl …` resolves to `curl` (not `kv`) and `MB=$(git merge-base …) && …` to `git` (not `merge-base`). `_RE_LINE_CONT` collapses `\<newline>` continuations, `_RE_CD_PREFIX` accepts `;` / newline separators, leading `(` paren groups are stripped, and a `$VAR` base classifies as `mutating`. Closes Forgejo #4.
+
+- **grep-family secret-scan exemption survives command-runner wrapping.** A bare `grep '<token-shape>' .` is exempt from the inline secret scan (it searches *for* a pattern, it doesn't use one), but `timeout 300 grep '<token-shape>'` and `source … && grep '<token-shape>'` were mislabeled `destructive` because the scan keyed on the literal wrapper base before dispatch. New `_effective_base` resolves through runners so the exemption follows the *resolved* command — matching what the PreToolUse hook already does. A wrapped non-grep command (`timeout 5 curl -H '<token>'`) is still scanned and still flagged.
+
+### Tests
+
+- **1338 tests across 19 suites** (was 1299). `tests/test_report.py` adds the #3/#4 classification cases, 7 grep-exemption cases (3 FP fixes + 3 regression guards + 1 env-prefix), and 7 `normalize_command` attribution cases. Token pattern-sync 10/10.
+
+---
+
 False-positive / usability fixes to the secret-detection hook and report (2026-05-28). Two Forgejo issues (#1, #2) filed with repro/root-cause/fix and closed in `aaa442a`.
 
 ### Fixed

@@ -51,9 +51,33 @@ def _cwd_to_project_slug():
     """
     return "-" + os.getcwd().lstrip("/").replace("/", "-")
 
-_RE_CD_PREFIX = re.compile(r'^(cd\s+(?:\S+|"[^"]*"|\'[^\']*\')\s*&&\s*)+')
-_RE_ENV_PREFIX = re.compile(r'^(\w+=(?:\S+|"[^"]*"|\'[^\']*\')\s+)+')
+# cd-prefix accepts `&&`, `;`, or a literal newline as the separator before
+# the next command. Newlines occur in multi-line tool inputs where a script
+# uses implicit newline-as-separator instead of `&&`.
+_RE_CD_PREFIX = re.compile(
+    r'^(cd\s+(?:\S+|"[^"]*"|\'[^\']*\')\s*(?:&&|;|\n)\s*)+'
+)
+# Env-prefix matches VAR=value pairs at the start of a command. The value
+# alternatives are tried in order: $(subshell), `subshell`, ${brace}, "double",
+# 'single', \S+. Subshell-first ordering prevents the strip from over-consuming
+# when the value contains `$(...)` (see issue #4).
+_RE_ENV_PREFIX = re.compile(
+    r'^(\w+=(?:\$\(.*?\)|`[^`]*`|\$\{[^}]*\}|"[^"]*"|\'[^\']*\'|\S+)\s+)+'
+)
 _RE_SHELL_OPS = re.compile(r'^[&|;]+\s*')
+# Backslash line continuation: `\<newline>` should be collapsed to whitespace
+# before prefix-stripping so multi-line scripts classify like their joined form.
+_RE_LINE_CONT = re.compile(r'\\\s*\n\s*')
+# Used to find the boundary between a command-runner argument (e.g. `source X`)
+# and the chained command that follows (`&& Y`, `; Y`, `|| Y`).
+_RE_CMD_CHAIN = re.compile(r'\s+(?:&&|\|\||;)\s+')
+# Matches a timeout duration argument like `5`, `5s`, `1.5m`, `30`.
+_RE_TIMEOUT_DURATION = re.compile(r'^\d+\.?\d*[smhd]?$')
+# Commands that *search for* patterns rather than *using* secrets — exempt from
+# the inline secret scan in classify_risk. When one of these is wrapped in a
+# command-runner (`timeout … grep …`, `source … && grep …`), the exemption must
+# follow the resolved base, not the wrapper; see `_effective_base`.
+_GREP_FAMILY = ("grep", "egrep", "fgrep", "rg", "ag", "ack", "find", "sed", "awk")
 
 # --- Secret detection (patterns derived from gitleaks) ---
 
@@ -312,100 +336,7 @@ def _cmd_has_secrets(raw_cmd):
 def classify_risk(tool_name, tool_input):
     """Classify a tool call as destructive/mutating/read-only."""
     if tool_name == "Bash":
-        raw_cmd = tool_input.get("command", "").strip()
-        cmd = _RE_CD_PREFIX.sub('', raw_cmd)
-        cmd = _RE_ENV_PREFIX.sub('', cmd)
-        cmd = _RE_SHELL_OPS.sub('', cmd)
-        parts = cmd.split()
-        if not parts or parts[0].startswith("#"):
-            return "read-only"
-
-        base = os.path.basename(parts[0])
-        # Strip trailing punctuation from parsing artifacts
-        base = base.rstrip('"\')}')
-
-        if base not in ("grep", "egrep", "fgrep", "rg", "ag", "ack", "find", "sed", "awk"):
-            if _cmd_has_secrets(raw_cmd):
-                return "destructive"
-
-        # Git subcommand-aware classification
-        if base == "git" and len(parts) > 1:
-            subcmd = parts[1]
-            if subcmd in GIT_DESTRUCTIVE_FLAGS:
-                rest_args = parts[2:]
-                if subcmd == "clean" and any(a in ('-n', '--dry-run') for a in rest_args):
-                    return "read-only"
-                for arg in rest_args:
-                    if arg in GIT_DESTRUCTIVE_FLAGS[subcmd]:
-                        return "destructive"
-                    if subcmd == "clean" and arg.startswith("-") and not arg.startswith("--") and "f" in arg:
-                        return "destructive"
-            if subcmd in GIT_READ_ONLY_SUBCMDS:
-                return "read-only"
-            return "mutating"
-
-        # find with -delete or -exec
-        if base == "find":
-            rest = " ".join(parts[1:])
-            if "-delete" in rest:
-                return "destructive"
-            if "-exec" in rest or "-execdir" in rest:
-                return "mutating"
-            return "read-only"
-
-        # sed with -i (including -i.bak, -ni, etc.) is mutating, otherwise read-only
-        if base == "sed":
-            for arg in parts[1:]:
-                if arg == "--in-place":
-                    return "mutating"
-                if arg.startswith("-") and not arg.startswith("--") and "i" in arg:
-                    return "mutating"
-            return "read-only"
-
-        # ansible-playbook with --check/--syntax-check is read-only
-        if base == "ansible-playbook":
-            for arg in parts[1:]:
-                if arg in ("--check", "-C", "--syntax-check", "--list-tasks", "--list-hosts"):
-                    return "read-only"
-            return "mutating"
-
-        # curl: check method
-        if base == "curl":
-            rest = " ".join(parts[1:])
-            if re.search(r'-X\s*DELETE|--request\s+DELETE', rest, re.IGNORECASE):
-                return "destructive"
-            if re.search(r'-X\s*(?:POST|PUT|PATCH)|--request\s+(?:POST|PUT|PATCH)|--data\b|-d\s|-F\s', rest, re.IGNORECASE):
-                return "mutating"
-            return "read-only"
-
-        if base in DESTRUCTIVE_COMMANDS:
-            return "destructive"
-        if base in READ_ONLY_COMMANDS:
-            return "read-only"
-        if base in MUTATING_COMMANDS:
-            return "mutating"
-        # Shell builtins/syntax that aren't real commands
-        if base in ("for", "while", "if", "else", "then", "do", "done",
-                    "fi", "case", "esac", "{", "}", "[[", "(("):
-            return "read-only"
-        # Flags, IP addresses, user@host, and other parsing artifacts
-        if base.startswith("-") or re.match(r'^\d+\.\d+\.\d+\.\d+', base):
-            return "read-only"
-        if re.match(r'^[\w]+@[\d.]+$', base):
-            return "mutating"
-        # Shell scripts (.sh) are mutating by default
-        if base.endswith(".sh"):
-            return "mutating"
-        # Bare key material / secret references parsed as "commands"
-        clean_base = base.strip("\"'^)")
-        if _PREFIXED_TOKEN_PATTERNS.match(clean_base):
-            return "destructive"
-        if len(clean_base) >= 32 and re.match(r'^[A-Za-z0-9+/=]+$', clean_base):
-            if _shannon_entropy(clean_base) >= 3.5:
-                return "destructive"
-        if re.match(r'^[\w]*(API_KEY|_SECRET|_TOKEN|_PASSWORD|PRIVATE_KEY|CREDENTIAL)[\w]*$', clean_base.upper()):
-            return "destructive"
-        return "unknown"
+        return _classify_bash(tool_input.get("command", "").strip())
 
     # Non-Bash tools
     if tool_name in DESTRUCTIVE_COMMANDS:
@@ -416,6 +347,227 @@ def classify_risk(tool_name, tool_input):
         return "mutating"
     if tool_name.startswith("mcp__"):
         return "mutating"
+    return "unknown"
+
+
+def _classify_source_chain(cmd, depth):
+    """Classify a `source X [&& Y]` invocation by dispatching to Y if present."""
+    m = _RE_CMD_CHAIN.search(cmd)
+    if m:
+        rest = cmd[m.end():].strip().rstrip(')').strip()
+        if rest:
+            return _classify_bash(rest, depth + 1)
+    return "mutating"
+
+
+def _timeout_cmd_index(parts):
+    """Return the index of the wrapped command after `timeout`'s flags+duration.
+
+    `parts` is the tokenized `timeout …` command. Returns the index just past
+    the duration argument (which may equal len(parts) for a bare `timeout 5`),
+    or None when the form is malformed (no duration found).
+    """
+    i = 1
+    while i < len(parts):
+        tok = parts[i]
+        # Paired flags: consume flag and its value.
+        if tok in ('-k', '--kill-after', '-s', '--signal'):
+            i += 2
+            continue
+        # Long-form `--flag=value` paired flags.
+        if tok.startswith('--kill-after=') or tok.startswith('--signal='):
+            i += 1
+            continue
+        # Boolean flags.
+        if tok in ('--foreground', '--preserve-status', '-v', '--verbose',
+                   '--help', '--version'):
+            i += 1
+            continue
+        # First non-flag token is the duration; the command follows it.
+        if _RE_TIMEOUT_DURATION.match(tok):
+            return i + 1
+        # Malformed — no recognizable duration.
+        break
+    return None
+
+
+def _classify_timeout(parts, depth):
+    """Classify a `timeout [opts] DURATION CMD …` invocation by dispatching to CMD."""
+    i = _timeout_cmd_index(parts)
+    if i is None:
+        return "unknown"
+    rest = ' '.join(parts[i:])
+    if rest:
+        return _classify_bash(rest, depth + 1)
+    return "read-only"
+
+
+def _runner_inner_command(base, cmd, parts):
+    """Return the command string a runner delegates to, or None.
+
+    `source X && Y` / `source X; Y` delegate to `Y`; `timeout [opts] DUR CMD …`
+    delegates to `CMD …`. Bare `source X` / `timeout 5` (no inner command) and
+    any non-runner base return None.
+    """
+    if base in ("source", "."):
+        m = _RE_CMD_CHAIN.search(cmd)
+        if m:
+            rest = cmd[m.end():].strip().rstrip(')').strip()
+            return rest or None
+        return None
+    if base == "timeout":
+        i = _timeout_cmd_index(parts)
+        if i is not None and i < len(parts):
+            return ' '.join(parts[i:])
+        return None
+    return None
+
+
+def _effective_base(cmd, parts, base, depth=0):
+    """Resolve `base` through command-runners (source, timeout) to the underlying
+    command, so the grep-family secret-scan exemption keys on what is actually
+    run. `timeout 300 grep …` and `source x && grep …` both resolve to `grep`.
+
+    Non-runner bases (including `$VAR`) are returned unchanged — those still get
+    the full inline secret scan.
+    """
+    if depth > 4:
+        return base
+    inner = _runner_inner_command(base, cmd, parts)
+    if inner is not None:
+        sub = inner.split()
+        if sub:
+            b = os.path.basename(sub[0]).rstrip('"\')}')
+            return _effective_base(inner, sub, b, depth + 1)
+    return base
+
+
+def _classify_bash(raw_cmd, _depth=0):
+    """Classify a Bash command, recursing through command-runners (source, timeout).
+
+    The depth limit prevents pathological infinite recursion if a runner ever
+    points at itself; in practice 4 is well beyond any realistic nesting.
+    """
+    if _depth > 4:
+        return "mutating"
+
+    # Collapse `\<newline>` line continuations so a multi-line script classifies
+    # the same as its joined form.
+    cmd = _RE_LINE_CONT.sub(' ', raw_cmd)
+    cmd = _RE_CD_PREFIX.sub('', cmd)
+    cmd = _RE_ENV_PREFIX.sub('', cmd)
+    cmd = _RE_SHELL_OPS.sub('', cmd).lstrip()
+
+    # Strip a leading paren group: `(cmd …)` or `( cmd … )`. Single paren only —
+    # `((arith))` is shell-arithmetic and not interesting for risk.
+    if cmd.startswith('(') and not cmd.startswith('(('):
+        cmd = cmd[1:].lstrip()
+
+    parts = cmd.split()
+    if not parts or parts[0].startswith("#"):
+        return "read-only"
+
+    base = os.path.basename(parts[0])
+    # Strip trailing punctuation from parsing artifacts
+    base = base.rstrip('"\')}')
+
+    # Secret scan, exempting grep-family commands — they search *for* patterns
+    # rather than *using* them. Resolve through command-runners so a wrapped
+    # `timeout … grep <token-shape>` is exempt like a bare grep; a wrapped
+    # non-grep command (`timeout … curl -H <token>`) is still scanned.
+    if _effective_base(cmd, parts, base) not in _GREP_FAMILY:
+        if _cmd_has_secrets(raw_cmd):
+            return "destructive"
+
+    # Command-runners: dispatch to the trailing/underlying command.
+    if base in ("source", "."):
+        return _classify_source_chain(cmd, _depth)
+    if base == "timeout":
+        return _classify_timeout(parts, _depth)
+
+    # `$VAR` or `$VAR/path/...` as the base — opaque indirection; almost always
+    # invokes a script. Check parts[0] directly; basename strips the $-prefix
+    # when the value is a path like `$HOME/bin/tool`.
+    if parts[0].startswith("$"):
+        return "mutating"
+
+    # Git subcommand-aware classification
+    if base == "git" and len(parts) > 1:
+        subcmd = parts[1]
+        if subcmd in GIT_DESTRUCTIVE_FLAGS:
+            rest_args = parts[2:]
+            if subcmd == "clean" and any(a in ('-n', '--dry-run') for a in rest_args):
+                return "read-only"
+            for arg in rest_args:
+                if arg in GIT_DESTRUCTIVE_FLAGS[subcmd]:
+                    return "destructive"
+                if subcmd == "clean" and arg.startswith("-") and not arg.startswith("--") and "f" in arg:
+                    return "destructive"
+        if subcmd in GIT_READ_ONLY_SUBCMDS:
+            return "read-only"
+        return "mutating"
+
+    # find with -delete or -exec
+    if base == "find":
+        rest = " ".join(parts[1:])
+        if "-delete" in rest:
+            return "destructive"
+        if "-exec" in rest or "-execdir" in rest:
+            return "mutating"
+        return "read-only"
+
+    # sed with -i (including -i.bak, -ni, etc.) is mutating, otherwise read-only
+    if base == "sed":
+        for arg in parts[1:]:
+            if arg == "--in-place":
+                return "mutating"
+            if arg.startswith("-") and not arg.startswith("--") and "i" in arg:
+                return "mutating"
+        return "read-only"
+
+    # ansible-playbook with --check/--syntax-check is read-only
+    if base == "ansible-playbook":
+        for arg in parts[1:]:
+            if arg in ("--check", "-C", "--syntax-check", "--list-tasks", "--list-hosts"):
+                return "read-only"
+        return "mutating"
+
+    # curl: check method
+    if base == "curl":
+        rest = " ".join(parts[1:])
+        if re.search(r'-X\s*DELETE|--request\s+DELETE', rest, re.IGNORECASE):
+            return "destructive"
+        if re.search(r'-X\s*(?:POST|PUT|PATCH)|--request\s+(?:POST|PUT|PATCH)|--data\b|-d\s|-F\s', rest, re.IGNORECASE):
+            return "mutating"
+        return "read-only"
+
+    if base in DESTRUCTIVE_COMMANDS:
+        return "destructive"
+    if base in READ_ONLY_COMMANDS:
+        return "read-only"
+    if base in MUTATING_COMMANDS:
+        return "mutating"
+    # Shell builtins/syntax that aren't real commands
+    if base in ("for", "while", "if", "else", "then", "do", "done",
+                "fi", "case", "esac", "{", "}", "[[", "(("):
+        return "read-only"
+    # Flags, IP addresses, user@host, and other parsing artifacts
+    if base.startswith("-") or re.match(r'^\d+\.\d+\.\d+\.\d+', base):
+        return "read-only"
+    if re.match(r'^[\w]+@[\d.]+$', base):
+        return "mutating"
+    # Shell scripts (.sh) are mutating by default
+    if base.endswith(".sh"):
+        return "mutating"
+    # Bare key material / secret references parsed as "commands"
+    clean_base = base.strip("\"'^)")
+    if _PREFIXED_TOKEN_PATTERNS.match(clean_base):
+        return "destructive"
+    if len(clean_base) >= 32 and re.match(r'^[A-Za-z0-9+/=]+$', clean_base):
+        if _shannon_entropy(clean_base) >= 3.5:
+            return "destructive"
+    if re.match(r'^[\w]*(API_KEY|_SECRET|_TOKEN|_PASSWORD|PRIVATE_KEY|CREDENTIAL)[\w]*$', clean_base.upper()):
+        return "destructive"
     return "unknown"
 
 
@@ -580,7 +732,7 @@ def extract_tool_calls_from_assistant(content):
     return [c for c in content if isinstance(c, dict) and c.get("type") == "tool_use"]
 
 
-def normalize_command(cmd):
+def normalize_command(cmd, _depth=0):
     """Extract a groupable prefix from a bash command."""
     cmd = cmd.strip()
     cmd = _RE_CD_PREFIX.sub('', cmd)
@@ -595,6 +747,15 @@ def normalize_command(cmd):
     # Skip comment-only lines and shebangs
     if base.startswith("#"):
         return "(comment/shebang)"
+
+    # Command-runners delegate to an underlying command — group the suggestion
+    # by what's actually run, not the wrapper: `source … && python3 foo` groups
+    # as `python3 foo`, `timeout 300 semgrep …` as `semgrep`. Bare `source X`
+    # (env activation, no chained command) stays grouped as `source`.
+    if _depth <= 4:
+        inner = _runner_inner_command(base, cmd, parts)
+        if inner is not None:
+            return normalize_command(inner, _depth + 1)
 
     # For well-known commands, include the subcommand
     multi_word = {

@@ -191,6 +191,162 @@ check(report.classify_risk("mcp__vault__vault_read", {}) == "mutating", "MCP too
 
 
 # =============================================================================
+# Risk classification — command-runners (source, timeout) — issue #3
+# =============================================================================
+print("\n=== Risk classification: command-runners (source, timeout) ===")
+
+# `source` (and its dot-alias) activates env / runs a sub-script — treat as mutating
+# when used alone, and dispatch to the trailing command when chained with && or ;.
+check(report.classify_risk("Bash", {"command": "source .venv/bin/activate"}) == "mutating",
+      "source alone → mutating")
+check(report.classify_risk("Bash", {"command": ". .venv/bin/activate"}) == "mutating",
+      "dot alias for source → mutating")
+check(report.classify_risk("Bash", {"command": "source .venv/bin/activate && python3 foo.py"}) == "mutating",
+      "source ... && python3 → mutating (python3 is mutating)")
+check(report.classify_risk("Bash", {"command": "source .venv/bin/activate && ls -la"}) == "read-only",
+      "source ... && ls → read-only")
+check(report.classify_risk("Bash", {"command": "source .venv/bin/activate && rm -rf /tmp/x"}) == "destructive",
+      "source ... && rm -rf → destructive")
+
+# `timeout` is a command-wrapper — skip its duration argument and flags, then
+# classify the trailing command.
+check(report.classify_risk("Bash", {"command": "timeout 300 semgrep --config rules ."}) == "read-only",
+      "timeout DURATION semgrep → read-only")
+check(report.classify_risk("Bash", {"command": "timeout 5 ls /tmp"}) == "read-only",
+      "timeout 5 ls → read-only")
+check(report.classify_risk("Bash", {"command": "timeout 5s rm -rf /tmp/x"}) == "destructive",
+      "timeout 5s rm -rf → destructive")
+check(report.classify_risk("Bash", {"command": "timeout -k 5 30 curl -X POST http://example.com"}) == "mutating",
+      "timeout -k 5 30 curl POST → mutating")
+check(report.classify_risk("Bash", {"command": "timeout --kill-after=5s 30 rm -rf /tmp/x"}) == "destructive",
+      "timeout --kill-after=5s 30 rm -rf → destructive")
+check(report.classify_risk("Bash", {"command": "timeout --foreground 30 python3 script.py"}) == "mutating",
+      "timeout --foreground 30 python3 → mutating")
+check(report.classify_risk("Bash", {"command": "timeout -s SIGKILL 10 grep -r foo ."}) == "read-only",
+      "timeout -s SIGKILL 10 grep → read-only")
+
+
+# =============================================================================
+# Risk classification — env-prefix subshell handling — issue #4
+# =============================================================================
+print("\n=== Risk classification: env-prefix subshell / paren / $VAR ===")
+
+# Subshell in env value must not leak into the base command.
+check(report.classify_risk("Bash", {
+    "command": "TOKEN=$(vault kv get -field=api_token secret/forgejo) curl http://example.com"
+}) == "read-only",
+      "TOKEN=$(vault kv get ...) curl GET → read-only (not 'kv')")
+
+check(report.classify_risk("Bash", {
+    "command": "MB=$(git merge-base HEAD origin/main) && echo \"merge base: $MB\""
+}) == "read-only",
+      "MB=$(git merge-base ...) && echo → read-only (not 'merge-base')")
+
+# Backtick subshell — same handling as $().
+check(report.classify_risk("Bash", {
+    "command": "REV=`git rev-parse HEAD` && echo $REV"
+}) == "read-only",
+      "REV=`git rev-parse HEAD` && echo → read-only")
+
+# ${...} brace expansion in value should not break the prefix strip.
+check(report.classify_risk("Bash", {
+    "command": "OUT=${HOME}/log.txt cat ${OUT}"
+}) == "read-only",
+      "OUT=${HOME}/log.txt cat → read-only")
+
+# Leading paren grouping — strip and classify the inner command.
+check(report.classify_risk("Bash", {
+    "command": "(source .venv/bin/activate; python3 -m pytest)"
+}) == "mutating",
+      "(source ...; python3 ...) → mutating")
+check(report.classify_risk("Bash", {
+    "command": "(ls -la)"
+}) == "read-only",
+      "(ls -la) → read-only")
+
+# When the base is a shell variable like $WRAPPER, we can't see through it,
+# but it's almost certainly invoking a script — classify as mutating.
+check(report.classify_risk("Bash", {
+    "command": "WRAPPER=~/scripts/wrap.sh $WRAPPER do-thing"
+}) == "mutating",
+      "WRAPPER=... $WRAPPER cmd → mutating")
+check(report.classify_risk("Bash", {
+    "command": "$HOME/bin/tool --flag"
+}) == "mutating",
+      "$HOME/bin/tool ... → mutating")
+
+# Newline-separated multi-statement commands (the `cd PATH\nNEXT` case).
+check(report.classify_risk("Bash", {
+    "command": "cd ~/laima\necho '=== refs ==='\ngrep -r foo ."
+}) == "read-only",
+      "cd PATH<newline>echo<newline>grep → read-only")
+check(report.classify_risk("Bash", {
+    "command": "cd /tmp\nrm -rf /tmp/x"
+}) == "destructive",
+      "cd PATH<newline>rm -rf → destructive")
+check(report.classify_risk("Bash", {
+    "command": "cd /tmp; ls -la"
+}) == "read-only",
+      "cd PATH; ls → read-only (semicolon separator)")
+
+# Line-continuation: `\<newline>` should be collapsed before classification.
+check(report.classify_risk("Bash", {
+    "command": "cd /tmp && \\\n  echo foo"
+}) == "read-only",
+      "cd PATH && \\<newline> echo → read-only (line continuation)")
+check(report.classify_risk("Bash", {
+    "command": "cd ~/svc && \\\n  TOKEN=abc rm -rf /tmp/x"
+}) == "destructive",
+      "cd PATH && \\<newline> ENV=val rm -rf → destructive")
+
+
+# =============================================================================
+# Risk classification — grep-family secret-scan exemption survives wrapping
+# =============================================================================
+# A bare grep searching *for* a token shape is exempt from secret scanning
+# (it searches for patterns, it doesn't use them). When that grep is wrapped
+# in a command-runner (timeout/source) or carries an env prefix, the exemption
+# must follow the *effective* base, not the literal wrapper base — otherwise a
+# legitimate audit grep is mislabeled `destructive`. The PreToolUse hook
+# already peels wrappers before applying its grep-family exemption; the report
+# classifier must agree.
+print("\n=== Risk classification: grep-family exemption through wrappers ===")
+
+# These greps search FOR an AWS-key shape — exempt, even when wrapped.
+check(report.classify_risk("Bash", {
+    "command": "timeout 300 grep -rn 'AKIAIOSFODNN7EXAMPLE' ."
+}) == "read-only",
+      "timeout DURATION grep <token-shape> → read-only (not destructive)")
+check(report.classify_risk("Bash", {
+    "command": "source .venv/bin/activate && grep -rn 'AKIAIOSFODNN7EXAMPLE' ."
+}) == "read-only",
+      "source ... && grep <token-shape> → read-only (not destructive)")
+check(report.classify_risk("Bash", {
+    "command": "timeout 60 rg 'AKIAIOSFODNN7EXAMPLE' src/"
+}) == "read-only",
+      "timeout DURATION rg <token-shape> → read-only (not destructive)")
+check(report.classify_risk("Bash", {
+    "command": "TOKEN=$(vault kv get -field=x secret/y) grep -rn 'AKIAIOSFODNN7EXAMPLE' ."
+}) == "read-only",
+      "ENV=$(...) grep <token-shape> → read-only (not destructive)")
+
+# Regression guards — wrapping a NON-grep command must still catch a real
+# secret being *used*. The effective base resolves to curl, not grep.
+check(report.classify_risk("Bash", {
+    "command": "timeout 5 curl -H 'Authorization: Bearer AKIAIOSFODNN7EXAMPLE'"
+}) == "destructive",
+      "timeout DURATION curl -H <token> → destructive (secret still caught)")
+check(report.classify_risk("Bash", {
+    "command": "WRAPPER=~/w.sh $WRAPPER curl -H 'Authorization: AKIAIOSFODNN7EXAMPLE'"
+}) == "destructive",
+      "ENV=val $WRAPPER curl -H <token> → destructive (secret still caught)")
+check(report.classify_risk("Bash", {
+    "command": "TOKEN=AKIAIOSFODNN7EXAMPLE curl http://example.com"
+}) == "destructive",
+      "ENV=<token> curl → destructive (inline secret still caught)")
+
+
+# =============================================================================
 # Command normalization
 # =============================================================================
 print("\n=== Command normalization ===")
@@ -203,6 +359,22 @@ check(report.normalize_command("ssh user@192.168.86.100 uptime") == "ssh 192.168
       "ssh strips user@ prefix")
 check(report.normalize_command("cd /tmp && ls") == "ls", "cd prefix stripped")
 check(report.normalize_command("FOO=bar ls") == "ls", "env prefix stripped")
+# Command-runners attribute to the underlying command (issue #3) — no more
+# misleading `Bash(source *)` / `Bash(timeout *)` allowlist suggestions.
+check(report.normalize_command("source .venv/bin/activate && python3 foo.py") == "python3 foo.py",
+      "source ... && python3 → python3 foo.py (not 'source')")
+check(report.normalize_command("source .venv/bin/activate && git status") == "git status",
+      "source ... && git status → git status")
+check(report.normalize_command("timeout 300 semgrep --config rules .") == "semgrep",
+      "timeout DURATION semgrep → semgrep (not 'timeout')")
+check(report.normalize_command("timeout 5 grep -r foo .") == "grep",
+      "timeout DURATION grep → grep")
+check(report.normalize_command("timeout -k 5 30 curl -X POST http://x") == "curl",
+      "timeout -k 5 30 curl → curl")
+check(report.normalize_command("source .venv/bin/activate") == "source",
+      "bare source (no chained cmd) stays 'source'")
+check(report.normalize_command("timeout 5") == "timeout",
+      "bare timeout (no command) stays 'timeout'")
 check(report.normalize_command("") == "(empty)", "empty → (empty)")
 check(report.normalize_command("# test") == "(comment/shebang)", "comment → (comment/shebang)")
 check(report.normalize_command("/usr/local/bin/my-tool arg") == "my-tool", "path → basename")
