@@ -109,6 +109,22 @@ test_hook('Bash', {'command': f'echo {_sha256} >> notes.txt'}, False, 'echo 64-h
 test_hook('Bash', {'command': f'echo {_realb64}'}, True, 'bare base64-shaped blob w/ digits still blocks (entropy path)')
 test_hook('Bash', {'command': f'export API_KEY={_realb64}'}, True, 'real API_KEY= assignment still blocks')
 
+print("\n=== FP-FIX 5: deep relative paths must not trip the entropy gate (issue #5) ===")
+# A deep relative path confined to [A-Za-z0-9/] (no '.' or '-') crosses the base64
+# entropy threshold and was mistaken for a secret blob. Each path segment is a
+# benign filename token, so the whole path must be exempt. Assemble at runtime so
+# this file holds no literal high-entropy run.
+_path1 = "ansible/" + "roles/" + "prometheus/" + "templates/"            # trailing slash
+_path2 = "src/main/" + "java/com/" + "example/" + "service/AuthnController"
+test_hook('Bash', {'command': f'git diff -- {_path1} > /tmp/out.patch'}, False, 'git diff -- deep relative path (no block)')
+test_hook('Bash', {'command': f'ls {_path2}'}, False, 'ls deep relative path (no block)')
+test_hook('Bash', {'command': f'find {_path1} -type f'}, False, 'find deep relative path (no block)')
+# Positive controls — real base64 secrets must STILL block, even with a '/'.
+_blob_noslash = "aB3dE5fG7hJ9" + "kL1mN2pQ4rS6" + "tU8vW0xYzA12" + "cd34qZ"  # >=32, digits
+_blob_slash = "aB3dE5fG7hJ9kL1mN2pQ" + "/" + "rS6tU8vW0xYzA12cd34qZwE"        # blob w/ slash
+test_hook('Bash', {'command': f'echo {_blob_noslash}'}, True, 'bare base64 blob (no slash) still blocks')
+test_hook('Bash', {'command': f'echo {_blob_slash}'}, True, 'base64 blob containing slash still blocks')
+
 print(f"\n{'='*60}")
 print(f"Results: {results['pass']} passed, {results['fail']} failed")
 if results['fail'] > 0:
