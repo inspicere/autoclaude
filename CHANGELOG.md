@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.0] — 2026-06-19
+
+Path-aware entropy carve-outs across both the hook and the report (2026-06-19). Two Forgejo issues (#5, #7) closed — the deep-relative-path false positive the 2026-06-14 identifier/hex fix didn't cover, fixed in both the PreToolUse hook and the `--secrets` report so the two detectors stay in lockstep.
+
+### Fixed
+
+- **#5 — deep relative paths no longer hard-block** (`hooks/block-secrets.py`). The bare-token entropy gate's charset `^[A-Za-z0-9+/=]+$` permits `/`, so a deep relative path confined to `[A-Za-z0-9/]` (e.g. `ansible/roles/prometheus/templates/`) cleared 32 chars and the 3.5 Shannon threshold and blocked routine `git diff -- <path>` / `ls` / `find`. `_is_benign_high_entropy()` gains a path carve-out: a slash-bearing token is benign only when **every** `/`-separated segment is filename-shaped (`_RE_PATH_SEGMENT`) and low-entropy (`isalpha()` or entropy < 3.0). A real base64 blob containing `/` keeps a high-entropy segment and still scores. Closes Forgejo #5.
+
+- **#7 — `--secrets` no longer over-counts paths/identifiers as secrets** (`claude-approval-report.py`). The report's detector (`_has_high_entropy_blob`) and redactor (`_redact_b64`) had no benign carve-out at all, so the same `/`-in-charset bug — plus pure-alpha identifiers and git/sha hex — flagged ~every navigation command (554 flagged on a zero-secrets repo, ~505 of them relative source paths). Ported the hook's `_is_benign_high_entropy` verbatim and applied it to **both** the count and redaction paths, keeping the report in lockstep with the hook (`e055478` identifiers/hex + #5 path carve-out). A real base64 blob containing `/` still flags and still redacts. Closes Forgejo #7.
+
+### Tests
+
+- **1361 tests across 19 suites** (was 1345). `hooks/test_fp_fixes.py` adds FP-FIX 5 and `hooks/test_block_secrets.py` adds the #5 deep-path cases; `tests/test_report.py` adds 7 #7 cases (relative paths, pure-alpha identifier, 40-char git/sha hex → allow; base64-with-slash → still flagged & still redacted). Token pattern-sync 10/10.
+
+### Docs
+
+- `docs/block-secrets-false-positives.md` + `docs/history/block-secrets-fp-2026-06-19.md` + `docs/history/report-high-entropy-fp-2026-06-19.md` marked resolved with the implemented per-segment carve-out.
+
+---
+
 Entropy-gate false-positive fix (2026-06-14). Triaged a reported `block-secrets.py` FP (Vikunja #758): the camelCase/grep cases as literally reported were already non-blocking (grep-family exempt + the `len >= 32` gate), but the underlying entropy over-reach was still live for long identifiers and git/sha hashes.
 
 ### Fixed
