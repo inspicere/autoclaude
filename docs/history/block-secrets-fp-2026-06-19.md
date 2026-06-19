@@ -67,23 +67,32 @@ argument is the sole trigger**. This forecloses the camelCase misdiagnosis for g
 | `FREQ` (grep pattern) | 4 | yes | no | no |
 | `buildRrule` / camelCase id | ≤25 | yes | no | no |
 
-## Fix (confirmed)
+## Fix (shipped — issue #5 / PR #6)
 
-In `_is_benign_high_entropy` (or before the L637 gate), **skip tokens containing `/`** (≥2 slashes
-to be conservative). A `/`-bearing token is a path or URL-ish argument, not a base64/hex secret
-value — real secrets in this charset are base64, already covered by the source-token/sha carve-outs.
-This clears every case in both this and the 2026-06-09 writeup without weakening detection of
-actual value-position secrets.
+Resolved on branch `fix/issue-5-entropy-path-fp`. The fix lands in `_is_benign_high_entropy`, but is
+**stricter than the "skip any token with `/`" recommendation below**: it exempts a slash-bearing
+token only when **every** `/`-separated segment is filename-shaped (`_RE_PATH_SEGMENT =
+^[A-Za-z0-9._-]+$`) **and** low-entropy (`isalpha()` or `_shannon_entropy(seg) < 3.0`). A base64
+secret that contains a `/` retains a high-entropy segment, fails the all-segments test, and still
+gets entropy-scanned — so value-position secret detection is fully preserved. Every case in this and
+the 2026-06-09 writeup now passes. Tests: FP-FIX 5 in `hooks/test_fp_fixes.py` and the issue #5 block
+in `hooks/test_block_secrets.py`.
+
+Original recommendation (superseded by the per-segment approach above):
+
+> In `_is_benign_high_entropy` (or before the L637 gate), **skip tokens containing `/`** (≥2 slashes
+> to be conservative). A `/`-bearing token is a path or URL-ish argument, not a base64/hex secret
+> value — real secrets in this charset are base64, already covered by the source-token/sha carve-outs.
 
 Stronger, optional: don't entropy-scan **argument tokens of read-only verbs** (`ls`, `grep`, `find`,
 `cat`, `head`, `tail`) — the exfiltration risk is in `echo`/`curl`/`export` of a literal value, not
 in navigating the tree.
 
-## Workaround until patched
+## Workaround (pre-fix, for reference)
 
-Use the `Read` / `Glob` / `Grep` / `Explore` tools (they bypass this command scanner), or
-`./`-prefix / absolute-path the argument — though length alone still trips it, so the tool-based path
-is the reliable one.
+Before the issue #5 fix shipped: use the `Read` / `Glob` / `Grep` / `Explore` tools (they bypass this
+command scanner), or `./`-prefix / absolute-path the argument — though length alone still tripped it,
+so the tool-based path was the reliable one. No longer needed for filename-shaped package paths.
 
 ## Memory-pointer correction
 
