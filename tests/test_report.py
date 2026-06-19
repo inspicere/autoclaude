@@ -62,6 +62,22 @@ check(not report._has_high_entropy_blob(["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]),
 check(not report._has_high_entropy_blob(["short"]), "short token not flagged")
 check(not report._has_high_entropy_blob(["/usr/local/bin/something1234567890abcdef"]), "path not flagged")
 check(not report._has_high_entropy_blob(["./relative/path/with32charspaddd"]), "relative path not flagged")
+# issue #7: report-side analog of the hook's e055478 + path carve-outs.
+# Bare relative paths (no leading / . ~) whose segments are all filename-shaped
+# and low-entropy must not be flagged as base64 secrets.
+check(not report._has_high_entropy_blob(["app/src/main/kotlin/app/healthlog/ui/HomeScreen"]),
+      "bare relative path not flagged (issue #7)")
+check(not report._has_high_entropy_blob(["shared/src/commonMain/kotlin/app/healthlog/data"]),
+      "bare relative source path not flagged (issue #7)")
+# Parity with hook e055478: pure-alpha identifiers and git/sha hex digests.
+check(not report._has_high_entropy_blob(["AndroidDbPassphraseProviderFactoryImpl"]),
+      "pure-alpha identifier not flagged (e055478 analog)")
+check(not report._has_high_entropy_blob(["356a192b7913b04c54574d18c28d46e6395428ab"]),
+      "40-char git/sha1 hex not flagged (e055478 analog)")
+# Over-correction guards: real base64 secrets must STILL be flagged, including
+# ones containing '/' (their slash-separated segments are high-entropy).
+check(report._has_high_entropy_blob(["aB3xZ9kLmN4pQ7rS/tU2vW5yA8cE1fGhI"]),
+      "base64 blob with slash still flagged (issue #7 guard)")
 
 
 # =============================================================================
@@ -78,6 +94,13 @@ r = report.redact_secrets("-H 'Authorization: Bearer sk-ant-api03-xxxx'")
 check("<REDACTED>" in r and "sk-ant" not in r, "Bearer token redacted")
 r = report.redact_secrets("echo hello world")
 check(r == "echo hello world", "normal command unchanged")
+# issue #7: redaction must not blank out bare relative paths (same root cause
+# as the detector FP — _RE_BASE64_BLOB permits '/').
+r = report.redact_secrets("grep -rn X app/src/main/kotlin/app/healthlog/data/entity")
+check("app/src/main/kotlin/app/healthlog/data/entity" in r and "<REDACTED>" not in r,
+      "bare relative path not redacted (issue #7)")
+r = report.redact_secrets("token aB3xZ9kLmN4pQ7rS/tU2vW5yA8cE1fGhI")
+check("<REDACTED>" in r, "base64 blob with slash still redacted (issue #7 guard)")
 
 
 # =============================================================================

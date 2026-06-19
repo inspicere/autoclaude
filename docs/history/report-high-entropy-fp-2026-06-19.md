@@ -1,5 +1,24 @@
 # `--secrets` report high-entropy false positives — 2026-06-19
 
+## Resolution (issue #7)
+
+**Fixed.** Rather than the lowercase-dominant heuristic drafted below, the report now ports the
+hook's `_is_benign_high_entropy` verbatim (added to `claude-approval-report.py`) — exempting three
+classes: pure-alpha identifiers, 40/64-char git/sha hex, and slash-bearing tokens whose **every**
+`/`-separated segment is filename-shaped (`_RE_PATH_SEGMENT`) and low-entropy. This keeps the report
+detector in lockstep with the hook (per `e055478` + the issue #5 path carve-out) instead of
+introducing a second, divergent heuristic. The carve-out is applied in **both** `_has_high_entropy_blob`
+(the count) and `_redact_b64` inside `redact_secrets` (the display), since the redactor shares the
+same `/`-in-charset bug and was blanking relative paths as `<REDACTED>`. A real base64 blob containing
+`/` keeps a high-entropy segment and still flags/redacts. Tests: 7 cases added to `tests/test_report.py`
+(bare relative paths, pure-alpha identifier, git/sha hex — all allow; base64-with-slash — still
+flagged/redacted). Full suite 1361/1361 across 19 suites. The portability crash noted at the bottom was
+already resolved on `main` (commit `3335c9d`, `mkdtemp`).
+
+The original analysis is retained below for context.
+
+---
+
 Report-side analog of the hook bug fixed in `e055478`
 (*"fix(hooks): stop entropy gate blocking identifiers and git/sha hashes"*) and documented in
 [`block-secrets-fp-2026-06-19.md`](block-secrets-fp-2026-06-19.md). That fix landed in

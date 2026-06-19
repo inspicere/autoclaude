@@ -147,6 +147,8 @@ _RE_CURL_AUTH = re.compile(
 
 _RE_BASE64_BLOB = re.compile(r'[A-Za-z0-9+/=]{32,}')
 _RE_BEARER = re.compile(r'(Bearer\s+)\S+', re.IGNORECASE)
+_RE_HEX = re.compile(r'^[0-9a-fA-F]+$')
+_RE_PATH_SEGMENT = re.compile(r'^[A-Za-z0-9._-]+$')
 
 
 def _shannon_entropy(data):
@@ -157,6 +159,35 @@ def _shannon_entropy(data):
         counts[c] = counts.get(c, 0) + 1
     length = len(data)
     return -sum((n / length) * math.log2(n / length) for n in counts.values())
+
+
+def _is_benign_high_entropy(s):
+    """True if a >=32-char [A-Za-z0-9+/=] run is benign, not a secret.
+
+    Mirrors the hook's ``_is_benign_high_entropy`` so the report's detector
+    stops over-counting the same false positives the hook already exempts:
+    - Pure-alphabetic identifiers (camelCase/PascalCase source symbols). Real
+      base64 secrets carry digits and/or ``+`` ``/`` ``=``.
+    - Pure-hex digests of git/sha lengths (40 = sha1/commit, 64 = sha256).
+    - Slash-delimited relative paths whose every segment is itself a
+      filename-shaped, low-entropy token (e.g. ``app/src/main/kotlin/...``).
+      ``_RE_BASE64_BLOB`` permits ``/``, so deep relative paths cross the
+      entropy threshold; a real base64 blob containing ``/`` keeps a
+      high-entropy segment and still falls through to scoring (issue #7).
+    """
+    if s.isalpha():
+        return True
+    if len(s) in (40, 64) and _RE_HEX.match(s):
+        return True
+    if '/' in s:
+        segs = [seg for seg in s.split('/') if seg]
+        if segs and all(
+            _RE_PATH_SEGMENT.match(seg)
+            and (seg.isalpha() or _shannon_entropy(seg) < 3.0)
+            for seg in segs
+        ):
+            return True
+    return False
 
 
 def _has_secret_token(text):
@@ -177,6 +208,8 @@ def _has_high_entropy_blob(tokens):
         if clean.startswith(("/", ".", "~")):
             continue
         if len(clean) >= 32 and re.match(r'^[A-Za-z0-9+/=]+$', clean):
+            if _is_benign_high_entropy(clean):
+                continue
             ent = _shannon_entropy(clean)
             if ent >= 3.5:
                 return True
@@ -197,6 +230,8 @@ def redact_secrets(text):
     def _redact_b64(m):
         val = m.group(0)
         if val.startswith(("/", ".", "~")):
+            return val
+        if _is_benign_high_entropy(val):
             return val
         ent = _shannon_entropy(val)
         if ent >= 3.5:
