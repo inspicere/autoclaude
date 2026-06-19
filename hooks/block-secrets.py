@@ -198,22 +198,36 @@ _RE_ENV_READ_VALUE = re.compile(
 
 _RE_HIGH_ENTROPY = re.compile(r'^[A-Za-z0-9+/=]+$')
 _RE_HEX = re.compile(r'^[0-9a-fA-F]+$')
+_RE_PATH_SEGMENT = re.compile(r'^[A-Za-z0-9._-]+$')
 
 
 def _is_benign_high_entropy(s):
     """True if a >=32-char [A-Za-z0-9+/=] run is a benign source token, not a secret.
 
-    Two classes trip the base64 entropy gate but are never secrets (Vikunja #758):
+    Three classes trip the base64 entropy gate but are never secrets:
     - Pure-alphabetic identifiers (camelCase/PascalCase source symbols, e.g.
       ``AndroidDbPassphraseProviderFactory``). Real base64 secrets contain digits
-      and/or ``+`` ``/`` ``=``; an all-letter run is a code identifier.
+      and/or ``+`` ``/`` ``=``; an all-letter run is a code identifier (Vikunja #758).
     - Pure-hex digests of git/sha lengths (40 = sha1 / git commit, 64 = sha256).
       Narrow on length so ordinary hex secrets are still entropy-checked.
+    - Slash-delimited relative paths whose every segment is itself a filename-shaped,
+      low-entropy token (e.g. ``ansible/roles/prometheus/templates``). The base64
+      regex permits ``/`` so deep relative paths cross the entropy threshold and are
+      mistaken for secret blobs; a real base64 blob containing ``/`` has at least one
+      high-entropy segment and still falls through to entropy scoring (issue #5).
     """
     if s.isalpha():
         return True
     if len(s) in (40, 64) and _RE_HEX.match(s):
         return True
+    if '/' in s:
+        segs = [seg for seg in s.split('/') if seg]
+        if segs and all(
+            _RE_PATH_SEGMENT.match(seg)
+            and (seg.isalpha() or _shannon_entropy(seg) < 3.0)
+            for seg in segs
+        ):
+            return True
     return False
 
 _SAFE_PLACEHOLDERS = frozenset({

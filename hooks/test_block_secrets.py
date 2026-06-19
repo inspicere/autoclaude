@@ -111,6 +111,20 @@ def main():
     # Regression: a genuine .env read in an interpreter script still blocks
     results.append(bash("node -e \"require('fs').readFileSync('config/.env')\"", True))
 
+    print('\n=== issue #5: deep relative paths must not trip the entropy gate ===')
+    # Slash-delimited relative paths whose segments are all filename-shaped,
+    # low-entropy tokens are not secrets. The base64 entropy regex permits '/',
+    # so deep relative paths used to cross the threshold and block (issue #5).
+    results.append(bash('git diff -- ansible/roles/prometheus/templates/', False))
+    results.append(bash('ls src/main/java/com/example/service/AuthnController', False))
+    results.append(bash('cat config/environments/production/database/settings', False))
+    # Regression guard: genuine high-entropy base64 secrets as bare argv tokens
+    # must STILL block — including ones that merely contain a '/', because their
+    # slash-separated segments are themselves high-entropy and the path
+    # carve-out therefore does not apply.
+    results.append(bash('echo 7Qm2Xv9Lp4Rt8Wb3Yn6Kd1Hs5Gj0Zc4Va8Ne3Tr6Yu', True))
+    results.append(bash('echo 7Qm2Xv9Lp4Rt8Wb3/Yn6Kd1Hs5Gj0Zc4Va8Ne3Tr6Y', True))
+
     print('\n=== REGRESSION: Legitimate operations still allowed ===')
     results.append(bash('ls -la', False))
     results.append(bash('git status', False))

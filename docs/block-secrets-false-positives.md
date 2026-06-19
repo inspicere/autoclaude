@@ -85,7 +85,22 @@ Ranked by ease:
 5. **`cd` into the directory** (or `git -C <dir>`) so path tokens become short relative names below the 32-char threshold. (Plain `cd … && …` in a compound can itself prompt for permission; `git -C` avoids that.)
 6. **Split compound commands** into smaller ones — reduces token count but does **not** help if the long path token itself remains; combine with (1).
 
+## Resolution
+
+**Fixed in issue #5 / PR #6** (`fix/issue-5-entropy-path-fp`). `_is_benign_high_entropy()` now
+carries a path-aware carve-out: a slash-bearing token is exempted only when **every** `/`-separated
+segment is filename-shaped (`_RE_PATH_SEGMENT = ^[A-Za-z0-9._-]+$`) **and** low-entropy
+(`isalpha()` or `_shannon_entropy(seg) < 3.0`). This is a deliberately stricter variant of the
+"down-weight `/`-dense tokens" recommendation below: a real base64 blob that happens to contain a
+`/` keeps at least one high-entropy segment, so it fails the all-segments test and still falls
+through to entropy scoring — detection of slash-bearing secrets is preserved. The formerly-blocked
+cases (`git diff`, `grep`, `ls`, `find`, bare `ls` on a deep package dir) now pass.
+Regression coverage: FP-FIX 5 in `hooks/test_fp_fixes.py` plus issue #5 cases in
+`hooks/test_block_secrets.py`.
+
 ## Recommended detector fixes
+
+> Historical — the options that were considered before the fix above shipped. Retained for context.
 
 The rule is otherwise doing its job (32+ base64 chars at entropy ≥3.5 is a classic key/token
 shape). The fix is to stop treating filesystem paths as opaque blobs:
@@ -105,8 +120,11 @@ A `/`-density heuristic is the smallest, safest change: it preserves detection o
 
 ## Reproduce / verify
 
+> Note: since the issue #5 fix, the first command below is **allowed** (its path segments are all
+> filename-shaped and low-entropy). The pre-fix behaviour is described for the historical record.
+
 ```bash
-# Blocks (relative, alnum+slash, ≥32, entropy≥3.5):
+# Pre-fix: blocked (relative, alnum+slash, ≥32, entropy≥3.5). Post-fix: allowed (path carve-out).
 grep -r X shared/src/commonMain/kotlin/app/healthlog/data/entity/
 
 # Allowed (./ prefix → skip-listed):

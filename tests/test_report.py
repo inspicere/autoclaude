@@ -1756,18 +1756,24 @@ check(hasattr(report, '_cwd_to_project_slug'),
       "_cwd_to_project_slug helper exists")
 if hasattr(report, '_cwd_to_project_slug'):
     _orig_cwd = os.getcwd()
+    # Use a real, created temp dir instead of a hardcoded absolute path so the
+    # test is portable (CI checks the repo out somewhere other than the dev
+    # box's home). Derive the expected slug independently from the *resolved*
+    # cwd — mkdtemp may sit under a symlinked /tmp on some platforms.
+    _tmpdir = _tf.mkdtemp(prefix='slug-')
     try:
-        os.chdir('/home/terrabot/autoclaude')
+        os.chdir(_tmpdir)
+        _cwd = os.getcwd()
+        _expected = '-' + '-'.join(seg for seg in _cwd.split('/') if seg)
         _slug = report._cwd_to_project_slug()
-        check(_slug == '-home-terrabot-autoclaude',
-              f"slug for /home/terrabot/autoclaude == "
-              f"'-home-terrabot-autoclaude' (got {_slug!r})")
-        os.chdir('/tmp')
-        _slug = report._cwd_to_project_slug()
-        check(_slug == '-tmp',
-              f"slug for /tmp == '-tmp' (got {_slug!r})")
+        check(_slug == _expected,
+              f"slug for {_cwd} == {_expected!r} (got {_slug!r})")
     finally:
         os.chdir(_orig_cwd)
+        try:
+            os.rmdir(_tmpdir)
+        except OSError:
+            pass
 
 
 print("\n=== Phase 7: M2 --no-cross-project filters scan ===")
