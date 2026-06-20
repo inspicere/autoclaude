@@ -23,6 +23,7 @@ GitHub (PAT, fine-grained, app), GitLab, Anthropic, OpenAI, AWS (access key), Go
 
 - Primary: Shannon entropy >= 3.5 on 32+ char strings
 - Secondary: 3.0-3.5 range with unique-char-ratio >= 0.4 and max-char-frequency <= 0.15 (catches padding evasion)
+- Benign carve-outs (`_is_benign_high_entropy`, not flagged): pure-alpha identifiers; 40/64-char git/sha hex; `IDENT=` assignment prefixes (judged on the value, e.g. `CANON=/home/...`); lowercase-dominant alphanumeric identifiers (camelCase with digits, e.g. `linuxX64`, `UnusedMaterial3...`); and `/`- or `+`-delimited paths/lists whose every segment is filename-shaped and low-entropy or lowercase-dominant (e.g. `ansible/roles/prometheus/templates`, `iosArm64/linuxX64`). A real base64 blob keeps a high-entropy, low-lowercase segment and still flags. See `docs/history/report-entropy-fp-2026-06-20.md` (issues #5, #7, #9).
 
 **Sensitive file access (45+ tools)**
 

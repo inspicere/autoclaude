@@ -78,6 +78,33 @@ check(not report._has_high_entropy_blob(["356a192b7913b04c54574d18c28d46e6395428
 # ones containing '/' (their slash-separated segments are high-entropy).
 check(report._has_high_entropy_blob(["aB3xZ9kLmN4pQ7rS/tU2vW5yA8cE1fGhI"]),
       "base64 blob with slash still flagged (issue #7 guard)")
+# issue #9: residual FP shapes that survive the #7 path carve-out.
+# (A) VAR=/KEY= assignment prefix welds an identifier onto a path/literal value.
+check(not report._has_high_entropy_blob(["CANON=/home/inspicere/projects/healthlog"]),
+      "VAR=path prefix not flagged (issue #9 A)")
+check(not report._has_high_entropy_blob(["D=shared/src/commonMain/kotlin/app/healthlog/data"]),
+      "VAR=relpath prefix not flagged (issue #9 A)")
+check(not report._has_high_entropy_blob(["ITSAppUsesNonExemptEncryption=true"]),
+      "KEY=value plist token not flagged (issue #9 A)")
+# (B) digit-bearing path segments / KMP target lists (linuxX64, iosSimulatorArm64Test).
+check(not report._has_high_entropy_blob(["shared/build/generated/ksp/linuxX64"]),
+      "digit-bearing rel path not flagged (issue #9 B)")
+check(not report._has_high_entropy_blob(["shared/src/iosSimulatorArm64Test"]),
+      "digit-bearing camelCase rel path not flagged (issue #9 B)")
+check(not report._has_high_entropy_blob(["iosArm64/iosSimulatorArm64/linuxX64"]),
+      "KMP target list with digits not flagged (issue #9 B)")
+# (3) camelCase/identifier tokens with an embedded digit (no slash, no equals).
+check(not report._has_high_entropy_blob(["UnusedMaterial3ScaffoldPaddingParameter"]),
+      "digit-bearing identifier not flagged (issue #9)")
+# '+' is a base64 char but here it joins two source identifiers.
+check(not report._has_high_entropy_blob(["MigrationTest+MedicationQuantityMigrationTest"]),
+      "'+'-joined identifier list not flagged (issue #9)")
+# Over-correction guards for issue #9: a real base64 blob whose value happens to
+# carry a VAR= prefix, or contains '+', still flags (low-lowercase segments).
+check(report._has_high_entropy_blob(["FOO=aB3xZ9kLmN4pQ7rS/tU2vW5yA8cE1fGhI"]),
+      "VAR=base64 blob still flagged (issue #9 guard)")
+check(report._has_high_entropy_blob(["aB3xZ9kLmN4pQ7rS+tU2vW5yA8cE1fGhI"]),
+      "base64 blob with '+' still flagged (issue #9 guard)")
 
 
 # =============================================================================
@@ -101,6 +128,16 @@ check("app/src/main/kotlin/app/healthlog/data/entity" in r and "<REDACTED>" not 
       "bare relative path not redacted (issue #7)")
 r = report.redact_secrets("token aB3xZ9kLmN4pQ7rS/tU2vW5yA8cE1fGhI")
 check("<REDACTED>" in r, "base64 blob with slash still redacted (issue #7 guard)")
+# issue #9: the same benign carve-outs must apply to redaction (shares
+# _is_benign_high_entropy). VAR=path, digit-bearing paths and camelCase
+# identifiers must not be blanked out.
+r = report.redact_secrets("CANON=/home/inspicere/projects/healthlog")
+check("healthlog" in r and "<REDACTED>" not in r, "VAR=path not redacted (issue #9)")
+r = report.redact_secrets("gradle :shared:compileKotlinLinuxX64 shared/build/generated/ksp/linuxX64")
+check("linuxX64" in r and "<REDACTED>" not in r, "digit-bearing path not redacted (issue #9)")
+r = report.redact_secrets("grep UnusedMaterial3ScaffoldPaddingParameter build.log")
+check("UnusedMaterial3ScaffoldPaddingParameter" in r and "<REDACTED>" not in r,
+      "digit-bearing identifier not redacted (issue #9)")
 
 
 # =============================================================================
@@ -116,6 +153,18 @@ check(not report._cmd_has_secrets("ls -la"), "ls not flagged")
 check(not report._cmd_has_secrets("export API_KEY=changeme"), "placeholder value not flagged")
 check(not report._cmd_has_secrets("export API_KEY=placeholder"), "placeholder literal not flagged")
 check(not report._cmd_has_secrets("export API_KEY=$VAULT_TOKEN"), "variable reference not flagged")
+# issue #9 C: a secret-named var assigned from an environment read carries no
+# literal secret. The carve-out must hold even when a shell terminator (the ';'
+# from a following statement) is welded onto the captured value.
+check(not report._cmd_has_secrets('TOKEN=os.environ["FORGEJO_TOKEN"]'),
+      "os.environ read not flagged as secret_assign (issue #9 C)")
+check(not report._cmd_has_secrets('TOKEN=os.environ["FORGEJO_TOKEN"]; NAME="clove-ios"'),
+      "os.environ read with trailing ';' not flagged (issue #9 C)")
+check(not report._cmd_has_secrets('API_KEY=os.getenv("OPENAI_API_KEY") && run'),
+      "os.getenv read with trailing '&&' not flagged (issue #9 C)")
+# Guard: a real literal assignment is still flagged.
+check(report._cmd_has_secrets('TOKEN=realsecretvalue123; NAME="x"'),
+      "literal secret assignment still flagged (issue #9 C guard)")
 
 
 # =============================================================================
@@ -137,6 +186,12 @@ check(report._classify_exposure_risk('export TOKEN=os.getenv("X")or"abcdef123456
       "env read + concatenated literal still exposed")
 check(report._classify_exposure_risk("export API_KEY=realsecretvalue123", "secret_assign")[0] == "exposed",
       "plain literal still exposed")
+# issue #9 C: trailing shell terminator must not defeat the env-read carve-out
+# in the grading path (the real-world case had '; NAME="clove-ios"' appended).
+check(report._classify_exposure_risk('TOKEN=os.environ["FORGEJO_TOKEN"]; NAME="clove-ios"', "secret_assign")[0] == "false-positive",
+      "os.environ read with trailing ';' classified false-positive (issue #9 C)")
+check(report._classify_exposure_risk('API_KEY=os.getenv("OPENAI_API_KEY") && deploy', "secret_assign")[0] == "false-positive",
+      "os.getenv read with trailing '&&' classified false-positive (issue #9 C)")
 
 
 # =============================================================================

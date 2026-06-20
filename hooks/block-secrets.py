@@ -199,32 +199,59 @@ _RE_ENV_READ_VALUE = re.compile(
 _RE_HIGH_ENTROPY = re.compile(r'^[A-Za-z0-9+/=]+$')
 _RE_HEX = re.compile(r'^[0-9a-fA-F]+$')
 _RE_PATH_SEGMENT = re.compile(r'^[A-Za-z0-9._-]+$')
+# A leading ``IDENT=`` shell/property assignment prefix (issue #9). When present,
+# the entropy of the *value* is what matters, not the welded identifier.
+_RE_IDENT_ASSIGN_PREFIX = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*=')
+# An alphanumeric source identifier (camelCase/PascalCase, possibly with digits).
+_RE_IDENTIFIER_TOKEN = re.compile(r'^[A-Za-z][A-Za-z0-9]*$')
+
+
+def _is_lowercase_dominant(s):
+    """True if >50% of characters are lowercase letters.
+
+    camelCase/PascalCase source identifiers (incl. embedded digits, e.g.
+    ``linuxX64``, ``UnusedMaterial3ScaffoldPaddingParameter``) are lowercase-word
+    dominant; random base64 is ~40% lowercase (26 of 64 alphabet chars), so a
+    >0.5 threshold separates source symbols from secret blobs (issue #9).
+    """
+    return bool(s) and sum(c.islower() for c in s) / len(s) > 0.5
 
 
 def _is_benign_high_entropy(s):
     """True if a >=32-char [A-Za-z0-9+/=] run is a benign source token, not a secret.
 
-    Three classes trip the base64 entropy gate but are never secrets:
+    Classes that trip the base64 entropy gate but are never secrets:
+    - ``IDENT=value`` prefixes (``CANON=/home/...``, ``KEY=true``): judge the
+      value, not the welded identifier (issue #9 A).
     - Pure-alphabetic identifiers (camelCase/PascalCase source symbols, e.g.
       ``AndroidDbPassphraseProviderFactory``). Real base64 secrets contain digits
       and/or ``+`` ``/`` ``=``; an all-letter run is a code identifier (Vikunja #758).
     - Pure-hex digests of git/sha lengths (40 = sha1 / git commit, 64 = sha256).
       Narrow on length so ordinary hex secrets are still entropy-checked.
-    - Slash-delimited relative paths whose every segment is itself a filename-shaped,
-      low-entropy token (e.g. ``ansible/roles/prometheus/templates``). The base64
-      regex permits ``/`` so deep relative paths cross the entropy threshold and are
-      mistaken for secret blobs; a real base64 blob containing ``/`` has at least one
-      high-entropy segment and still falls through to entropy scoring (issue #5).
+    - Lowercase-dominant alphanumeric identifiers (``linuxX64``,
+      ``UnusedMaterial3...``) — camelCase symbols with digits (issue #9 B/3).
+    - ``/`` or ``+`` delimited paths/lists whose every segment is itself a
+      filename-shaped, low-entropy-or-lowercase-dominant token (e.g.
+      ``ansible/roles/prometheus/templates``, ``iosArm64/linuxX64``). The base64
+      regex permits ``/`` and ``+`` so deep relative paths cross the entropy
+      threshold and are mistaken for secret blobs; a real base64 blob has at
+      least one high-entropy (low-lowercase) segment and still falls through to
+      entropy scoring (issue #5, #9).
     """
+    m = _RE_IDENT_ASSIGN_PREFIX.match(s)
+    if m and m.end() < len(s):
+        return _is_benign_high_entropy(s[m.end():])
     if s.isalpha():
         return True
     if len(s) in (40, 64) and _RE_HEX.match(s):
         return True
-    if '/' in s:
-        segs = [seg for seg in s.split('/') if seg]
+    if _RE_IDENTIFIER_TOKEN.match(s) and _is_lowercase_dominant(s):
+        return True
+    if '/' in s or '+' in s:
+        segs = [seg for seg in re.split(r'[/+]', s) if seg]
         if segs and all(
             _RE_PATH_SEGMENT.match(seg)
-            and (seg.isalpha() or _shannon_entropy(seg) < 3.0)
+            and (seg.isalpha() or _shannon_entropy(seg) < 3.0 or _is_lowercase_dominant(seg))
             for seg in segs
         ):
             return True
