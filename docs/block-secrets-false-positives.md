@@ -146,3 +146,25 @@ pattern, no identifier) reproduced the block — the **minimal repro** confirmin
 against the live hook source (`block-secrets.py` L199 charset-includes-`/`, L637 length gate, L640–642
 entropy gate, L203 benign-allowlist that exempts source tokens + sha hex but **not** paths). Full
 writeup with the source-cited tables: [`history/block-secrets-fp-2026-06-19.md`](history/block-secrets-fp-2026-06-19.md).
+
+## 2026-06-20 follow-up (issue #9)
+
+The per-segment path carve-out added for #5 left three residual shapes that still tripped the gate,
+surfaced from the report side (`--secrets`) but rooted in the **same shared `_is_benign_high_entropy`**
+(the hook had the identical gap and would still block these):
+
+- **`IDENT=` prefixes** — `CANON=/home/inspicere/projects/healthlog`, the plist token
+  `ITSAppUsesNonExemptEncryption=true`. The `=` made the first `/`-segment fail `_RE_PATH_SEGMENT`,
+  so the whole token fell through to entropy scoring. Now a leading `IDENT=` is stripped and the
+  **value** is judged.
+- **digit-bearing path segments / camelCase identifiers** — `linuxX64`, `iosSimulatorArm64Test`,
+  `UnusedMaterial3ScaffoldPaddingParameter`. These aren't `.isalpha()` and their per-segment entropy
+  exceeds 3.0. Now exempted via a **lowercase-dominant** test (>50% lowercase): source symbols are
+  0.5–0.9 lowercase, random base64 ~0.4.
+- **`+`-joined identifier lists** — `MigrationTest+MedicationQuantityMigrationTest`. Segments are now
+  split on `[/+]` (both are base64 chars), so each is checked independently.
+
+Over-correction guards: a `VAR=`-prefixed real base64 blob, and a base64 blob containing `/` or `+`,
+keep a high-entropy low-lowercase segment and **still block**. Fixed in both `hooks/block-secrets.py`
+and `claude-approval-report.py` to keep the two detectors in lockstep. Full writeup:
+[`history/report-entropy-fp-2026-06-20.md`](history/report-entropy-fp-2026-06-20.md).

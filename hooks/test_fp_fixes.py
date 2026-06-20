@@ -125,6 +125,23 @@ _blob_slash = "aB3dE5fG7hJ9kL1mN2pQ" + "/" + "rS6tU8vW0xYzA12cd34qZwE"        # 
 test_hook('Bash', {'command': f'echo {_blob_noslash}'}, True, 'bare base64 blob (no slash) still blocks')
 test_hook('Bash', {'command': f'echo {_blob_slash}'}, True, 'base64 blob containing slash still blocks')
 
+print("\n=== FP-FIX 6: residual entropy FP shapes from issue #9 ===")
+# (A) VAR=/KEY= assignment prefix welds an identifier onto a path/literal value.
+_vp = "CANON=/home/" + "inspicere/" + "projects/healthlog"
+test_hook('Bash', {'command': f'{_vp}; echo $CANON'}, False, 'VAR=path prefix not blocked (issue #9 A)')
+# (B) digit-bearing path segments / KMP target lists (linuxX64, iosSimulatorArm64Test).
+_kmp = "shared/build/" + "generated/ksp/" + "linuxX64"
+test_hook('Bash', {'command': f'ls {_kmp}'}, False, 'digit-bearing rel path not blocked (issue #9 B)')
+_targets = "iosArm64/" + "iosSimulatorArm64/" + "linuxX64"
+test_hook('Bash', {'command': f'echo {_targets}'}, False, 'KMP target list with digits not blocked (issue #9 B)')
+# (3) camelCase identifier with an embedded digit (no slash, no equals).
+_id = "UnusedMaterial3" + "ScaffoldPaddingParameter"
+test_hook('Bash', {'command': f'grep {_id} build.log'}, False, 'digit-bearing identifier not blocked (issue #9)')
+# Positive controls — a VAR= prefixed real blob, and a '+'-containing blob, still block.
+test_hook('Bash', {'command': f'export FOO={_blob_noslash}'}, True, 'VAR=base64 blob still blocks (issue #9 guard)')
+_blob_plus = "aB3dE5fG7hJ9kL1mN2pQ" + "+" + "rS6tU8vW0xYzA12cd34qZwE"          # blob w/ '+'
+test_hook('Bash', {'command': f'echo {_blob_plus}'}, True, "base64 blob containing '+' still blocks (issue #9 guard)")
+
 print(f"\n{'='*60}")
 print(f"Results: {results['pass']} passed, {results['fail']} failed")
 if results['fail'] > 0:

@@ -149,6 +149,15 @@ _RE_BASE64_BLOB = re.compile(r'[A-Za-z0-9+/=]{32,}')
 _RE_BEARER = re.compile(r'(Bearer\s+)\S+', re.IGNORECASE)
 _RE_HEX = re.compile(r'^[0-9a-fA-F]+$')
 _RE_PATH_SEGMENT = re.compile(r'^[A-Za-z0-9._-]+$')
+# A leading ``IDENT=`` shell/property assignment prefix (issue #9). When present,
+# the entropy of the *value* is what matters, not the welded identifier.
+_RE_IDENT_ASSIGN_PREFIX = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*=')
+# An alphanumeric source identifier (camelCase/PascalCase, possibly with digits).
+_RE_IDENTIFIER_TOKEN = re.compile(r'^[A-Za-z][A-Za-z0-9]*$')
+# Trailing shell statement separators welded onto a ``\S+``-captured value, e.g.
+# ``os.environ["X"];`` from ``TOKEN=os.environ["X"]; NAME=y`` (issue #9). ``)`` is
+# intentionally excluded — it can be a legitimate trailing char of an env read.
+_RE_VALUE_TRAILER = re.compile(r'[;&|]+$')
 
 
 def _shannon_entropy(data):
@@ -161,29 +170,50 @@ def _shannon_entropy(data):
     return -sum((n / length) * math.log2(n / length) for n in counts.values())
 
 
+def _is_lowercase_dominant(s):
+    """True if >50% of characters are lowercase letters.
+
+    camelCase/PascalCase source identifiers (incl. embedded digits, e.g.
+    ``linuxX64``, ``UnusedMaterial3ScaffoldPaddingParameter``) are lowercase-word
+    dominant; random base64 is ~40% lowercase (26 of 64 alphabet chars), so a
+    >0.5 threshold separates source symbols from secret blobs (issue #9).
+    """
+    return bool(s) and sum(c.islower() for c in s) / len(s) > 0.5
+
+
 def _is_benign_high_entropy(s):
     """True if a >=32-char [A-Za-z0-9+/=] run is benign, not a secret.
 
     Mirrors the hook's ``_is_benign_high_entropy`` so the report's detector
     stops over-counting the same false positives the hook already exempts:
+    - ``IDENT=value`` prefixes (``CANON=/home/...``, ``KEY=true``): judge the
+      value, not the welded identifier (issue #9 A).
     - Pure-alphabetic identifiers (camelCase/PascalCase source symbols). Real
       base64 secrets carry digits and/or ``+`` ``/`` ``=``.
     - Pure-hex digests of git/sha lengths (40 = sha1/commit, 64 = sha256).
-    - Slash-delimited relative paths whose every segment is itself a
-      filename-shaped, low-entropy token (e.g. ``app/src/main/kotlin/...``).
-      ``_RE_BASE64_BLOB`` permits ``/``, so deep relative paths cross the
-      entropy threshold; a real base64 blob containing ``/`` keeps a
-      high-entropy segment and still falls through to scoring (issue #7).
+    - Lowercase-dominant alphanumeric identifiers (``linuxX64``,
+      ``UnusedMaterial3...``) — camelCase symbols with digits (issue #9 B/3).
+    - ``/`` or ``+`` delimited paths/lists whose every segment is itself a
+      filename-shaped, low-entropy-or-lowercase-dominant token (e.g.
+      ``app/src/main/kotlin/...``, ``iosArm64/linuxX64``). ``_RE_BASE64_BLOB``
+      permits ``/`` and ``+``, so deep relative paths cross the entropy
+      threshold; a real base64 blob keeps a high-entropy (low-lowercase) segment
+      and still falls through to scoring (issue #7, #9).
     """
+    m = _RE_IDENT_ASSIGN_PREFIX.match(s)
+    if m and m.end() < len(s):
+        return _is_benign_high_entropy(s[m.end():])
     if s.isalpha():
         return True
     if len(s) in (40, 64) and _RE_HEX.match(s):
         return True
-    if '/' in s:
-        segs = [seg for seg in s.split('/') if seg]
+    if _RE_IDENTIFIER_TOKEN.match(s) and _is_lowercase_dominant(s):
+        return True
+    if '/' in s or '+' in s:
+        segs = [seg for seg in re.split(r'[/+]', s) if seg]
         if segs and all(
             _RE_PATH_SEGMENT.match(seg)
-            and (seg.isalpha() or _shannon_entropy(seg) < 3.0)
+            and (seg.isalpha() or _shannon_entropy(seg) < 3.0 or _is_lowercase_dominant(seg))
             for seg in segs
         ):
             return True
@@ -353,7 +383,12 @@ def _cmd_has_secrets(raw_cmd):
     m = _RE_SECRET_ASSIGN.search(raw_cmd)
     if m:
         val = m.group(2).strip("\"'")
-        if (len(val) > 8
+        # An env read (os.environ[...] / os.getenv(...) / process.env.X) puts no
+        # literal secret in the command text. Strip a trailing shell terminator
+        # first so a welded `;`/`&`/`|` from a following statement doesn't defeat
+        # the anchored match (issue #9 C).
+        if (not _RE_ENV_READ_VALUE.match(_RE_VALUE_TRAILER.sub('', val))
+                and len(val) > 8
                 and not val.startswith(('$', '{', 'http://', 'https://', '/'))
                 and val.lower() not in (
                     'changeme', 'password', 'placeholder', 'example',
@@ -2021,7 +2056,9 @@ def _classify_exposure_risk(cmd, category):
                 return ("runtime", f"{var_name} set from subshell — may appear in output")
             if val.startswith('$') or val.startswith('${'):
                 return ("variable", f"{var_name} set from variable {val}")
-            if _RE_ENV_READ_VALUE.match(val):
+            # Strip a trailing shell terminator welded onto the captured value so
+            # `os.environ["X"];` (from `TOKEN=...; NAME=y`) still matches (issue #9 C).
+            if _RE_ENV_READ_VALUE.match(_RE_VALUE_TRAILER.sub('', val)):
                 return ("false-positive", f"{var_name} read from the environment (no literal secret)")
             return ("exposed", f"Literal value assigned to {var_name}")
         return ("exposed", "Secret assignment with literal value")
