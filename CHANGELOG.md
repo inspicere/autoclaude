@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.1] — 2026-06-20
+
+Residual entropy false-positive fixes (issue #9), closing the shapes the #5/#7 path carve-outs didn't reach. Applied to **both** the report and the hook — their `_is_benign_high_entropy` was identical and shared the same gaps.
+
 ### Fixed
 
 - **#9 — residual `--secrets` high-entropy / secret_assign false positives** (`claude-approval-report.py`, `hooks/block-secrets.py`). After the #5/#7 path carve-outs, four shapes still flagged on a zero-secrets repo (16 `EXPOSED`, all FPs). `_is_benign_high_entropy` now (A) strips a leading `IDENT=` assignment prefix and judges the value (`CANON=/home/...`, `ITSAppUsesNonExemptEncryption=true`); and (B) exempts lowercase-dominant alphanumeric identifiers (camelCase with digits, e.g. `linuxX64`, `UnusedMaterial3...`) at both whole-token and per-segment level, splitting segments on `[/+]`. The carve-outs are mirrored in the hook (its `_is_benign_high_entropy` was identical and had the same gap — it would still block `git diff -- shared/build/generated/ksp/linuxX64`). (C) The report's env-read carve-out (`os.environ`/`os.getenv`/`process.env`) is now applied in the detection gate `_cmd_has_secrets`, and a trailing `[;&|]` shell terminator is stripped before the anchored env-read match in both detection and grading paths so `TOKEN=os.environ["X"]; NAME=y` isn't graded `EXPOSED`. Over-correction guards: `VAR=`-prefixed real base64 and base64 containing `/`/`+` still flag/block; a literal welded onto an env read still grades exposed. Side-finding D (40/64-hex git-SHA exemption masking a real hex token) left as a documented trade-off. Closes Forgejo #9.
