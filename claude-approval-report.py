@@ -1178,6 +1178,8 @@ def process_session(jsonl_path, allow_patterns, project_name):
     objects = []
     dropped = 0
     for line in lines:
+        if not line.strip():
+            continue  # blank/whitespace-only lines (often a trailing EOF newline) are not malformed
         try:
             objects.append(json.loads(line))
         except json.JSONDecodeError:
