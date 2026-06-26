@@ -99,7 +99,7 @@ Reference these docs when adding new secret patterns or modifying detection logi
 
 Two Forgejo Actions workflows run on push to `main` and on PRs:
 
-1. **`test.yml`** — runs all 19 test suites (1361 tests). Results uploaded to DefectDojo as "Generic Findings Import" under engagement "CI Tests". Clean runs auto-close previous findings via `close_old_findings=true`.
+1. **`test.yml`** — runs all 19 test suites (1429 tests). Results uploaded to DefectDojo as "Generic Findings Import" under engagement "CI Tests". Clean runs auto-close previous findings via `close_old_findings=true`.
 
 2. **`security-scan.yml`** — runs gitleaks (secret detection), semgrep (Python SAST), and trivy (filesystem vuln scan). Each scanner's native JSON output is uploaded to DefectDojo under engagement "Security Scans" using the scanner-specific import type. Gitleaks failures block the build; semgrep/trivy are informational. Test files are allowlisted in `.gitleaks.toml` to avoid false positives on intentional test fixture patterns.
 
