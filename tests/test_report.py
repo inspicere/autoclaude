@@ -305,6 +305,49 @@ check(report.classify_risk("Bash", {"command": "timeout -s SIGKILL 10 grep -r fo
 
 
 # =============================================================================
+# Risk classification — command sequences (;, &&, ||) → max severity
+# =============================================================================
+print("\n=== Risk classification: command sequences ===")
+
+# _split_top_level_segments
+check(report._split_top_level_segments("a; b") == ["a", "b"], "split on ;")
+check(report._split_top_level_segments("a && b") == ["a", "b"], "split on &&")
+check(report._split_top_level_segments("a || b") == ["a", "b"], "split on ||")
+check(report._split_top_level_segments("foo") == ["foo"], "no separator → single segment")
+check(report._split_top_level_segments("echo 'a; b'") == ["echo 'a; b'"], "quoted ; not split")
+check(report._split_top_level_segments('echo "a && b"') == ['echo "a && b"'], "quoted && not split")
+check(report._split_top_level_segments("x=$(a; b); y") == ["x=$(a; b)", "y"], "subshell ; not split")
+check(report._split_top_level_segments("a & b") == ["a & b"], "single & (background) not split")
+check(report._split_top_level_segments("cat a | grep b") == ["cat a | grep b"], "single pipe not split")
+check(report._split_top_level_segments("a; b; c") == ["a", "b", "c"], "three segments")
+
+# A benign leading command must not mask a dangerous trailing one.
+check(report.classify_risk("Bash", {"command": "true; rm -rf /tmp/x"}) == "destructive",
+      "true; rm -rf → destructive")
+check(report.classify_risk("Bash", {"command": "true && git push --force"}) == "destructive",
+      "true && git push --force → destructive")
+check(report.classify_risk("Bash", {"command": "echo hi; curl -X DELETE http://x"}) == "destructive",
+      "echo; curl DELETE → destructive")
+check(report.classify_risk("Bash", {"command": "ls && rm -rf /tmp/x"}) == "destructive",
+      "ls && rm -rf → destructive")
+# Sequences of read-only commands stay read-only.
+check(report.classify_risk("Bash", {"command": "true; sleep 5"}) == "read-only",
+      "true; sleep → read-only")
+check(report.classify_risk("Bash", {"command": "pwd; ls"}) == "read-only", "pwd; ls → read-only")
+check(report.classify_risk("Bash", {"command": "git status; echo done"}) == "read-only",
+      "git status; echo → read-only")
+# Trailing separator on a single command must not produce 'unknown'.
+check(report.classify_risk("Bash", {"command": "ls;"}) == "read-only", "ls; → read-only")
+# Single commands are unaffected by the sequence logic.
+check(report.classify_risk("Bash", {"command": "ls -la"}) == "read-only", "single ls unchanged")
+check(report.classify_risk("Bash", {"command": "git push --force"}) == "destructive",
+      "single force push unchanged")
+# Runner dispatch still wins over the generic split.
+check(report.classify_risk("Bash", {"command": "cd /tmp && rm -rf x"}) == "destructive",
+      "cd prefix + rm → destructive")
+
+
+# =============================================================================
 # Risk classification — env-prefix subshell handling — issue #4
 # =============================================================================
 print("\n=== Risk classification: env-prefix subshell / paren / $VAR ===")
@@ -460,6 +503,15 @@ check(report.normalize_command("terraform plan") == "terraform plan", "terraform
 check(report.normalize_command("npm install express") == "npm install", "npm install preserved")
 check(report.normalize_command("ssh -p 2222 host") == "ssh", "ssh with flag → ssh")
 check(report.normalize_command("python3 script.py") == "python3 script.py", "python3 preserved")
+# Leading shell operators / line-continuations must not become "commands"
+check(report.normalize_command("\\") == "(empty)", "bare backslash → (empty)")
+check(report.normalize_command("\\\n  python3 foo.py") == "python3 foo.py",
+      "leading line-continuation backslash stripped")
+check(report.normalize_command("true; sleep 5") == "true", "trailing ; on base stripped (true; → true)")
+check(report.normalize_command("&& python3 foo.py") == "python3 foo.py", "leading && stripped")
+check(report.normalize_command("; git status") == "git status", "leading ; stripped")
+check(report.normalize_command("| grep foo") == "grep", "leading pipe stripped")
+check(report.normalize_command(";") == "(empty)", "bare semicolon → (empty)")
 
 
 # =============================================================================
@@ -515,6 +567,20 @@ check(report.is_auto_allowed("Bash", {"command": "ls -la"}, patterns),
       "ls matches allowlist")
 check(not report.is_auto_allowed("Bash", {"command": "rm -rf /"}, patterns),
       "rm not in allowlist")
+# Interactive/control builtins are never gated by Claude Code — treat as auto-allowed
+# so they don't pollute prompted-friction stats or allowlist suggestions.
+check(report.is_auto_allowed("AskUserQuestion", {}, []),
+      "AskUserQuestion always auto-allowed (non-gated)")
+check(report.is_auto_allowed("TaskCreate", {}, []),
+      "TaskCreate always auto-allowed (non-gated)")
+check(report.is_auto_allowed("TaskUpdate", {}, []),
+      "TaskUpdate always auto-allowed (non-gated)")
+check(report.is_auto_allowed("EnterPlanMode", {}, []),
+      "EnterPlanMode always auto-allowed (non-gated)")
+check(report.is_auto_allowed("ExitPlanMode", {}, []),
+      "ExitPlanMode always auto-allowed (non-gated)")
+check(not report.is_auto_allowed("Bash", {"command": "rm -rf /"}, []),
+      "Bash still gated with empty patterns")
 
 
 # =============================================================================
@@ -649,6 +715,53 @@ check(report._is_noise_command("Bash: (comment/shebang)"), "(comment/shebang) is
 check(report._is_noise_command("Bash: -la"), "flag-like is noise")
 check(report._is_noise_command("Bash: 192.168.1.1"), "IP address is noise")
 check(not report._is_noise_command("Bash: git status"), "git status is not noise")
+
+
+# =============================================================================
+# build_suggestions — noise filtering
+# =============================================================================
+print("\n=== build_suggestions noise filtering ===")
+
+def _prompt_rec(display, risk="read-only", project="proj"):
+    return {"auto_allowed": False, "rejected": False,
+            "project": project, "display": display, "risk": risk}
+
+# Shell-operator/control-word displays must never become allowlist suggestions
+check(report.build_suggestions([_prompt_rec("Bash: &&") for _ in range(5)]) == [],
+      "Bash: && never suggested (noise)")
+check(report.build_suggestions([_prompt_rec("Bash: while") for _ in range(5)]) == [],
+      "Bash: while never suggested (noise)")
+check(report.build_suggestions([_prompt_rec("Bash: for") for _ in range(5)]) == [],
+      "Bash: for never suggested (noise)")
+# Real commands are still suggested
+_sugg_real = report.build_suggestions([_prompt_rec("Bash: git status") for _ in range(5)])
+check(len(_sugg_real) == 1 and _sugg_real[0][3] == "Bash(git status *)",
+      "real command still suggested")
+
+
+# =============================================================================
+# generate-settings exposure wording (Fix #3 — count consistency)
+# =============================================================================
+print("\n=== generate-settings exposure wording ===")
+
+def _exp_rec(risk, cat="auth_header"):
+    return {"rejected": False, "tool_name": "Bash", "_has_secrets": True,
+            "_secret_category": cat, "_exposure_risk": risk}
+
+# Three flagged commands, only one a literal exposure
+_exp_recs = [_exp_rec("exposed", "token"), _exp_rec("variable"), _exp_rec("variable")]
+check(len(report._find_secret_exposures(_exp_recs)) == 3, "find counts all 3 flagged")
+check(report._count_secret_exposures(_exp_recs) == 1, "count counts only 1 literal exposed")
+
+import contextlib
+_errbuf = io.StringIO()
+_sink = io.StringIO()
+with contextlib.redirect_stderr(_errbuf):
+    report.render_generate_settings(_exp_recs, out=_sink)
+_errtext = _errbuf.getvalue()
+check("would block" in _errtext, "generate-settings uses 'would block' framing")
+check("1 contained a literal secret" in _errtext, "literal-exposure subset surfaced")
+check("secret exposure(s) found" not in _errtext, "misleading 'exposures found' wording removed")
 
 
 # =============================================================================

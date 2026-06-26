@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0] — 2026-06-25
+
+Compound-command risk under-classification fix plus three report-accuracy cleanups, surfaced by running the analyzer over current session data. The first is security-relevant; the rest reduce noise and confusion in the report output.
+
+### Fixed
+
+- **Compound Bash commands were classified at the first segment's risk only** (`claude-approval-report.py`, `_classify_bash`). A benign leading command masked a dangerous trailing one — `true && git push --force` and `echo x; curl -X DELETE` classified as `read-only`, `true; rm -rf x` as `unknown`. New `_split_top_level_segments` (quote/`$()`/backtick/`${}`/paren/escape-aware; single `&` and `|` are not split points) and `_max_risk` (severity `destructive > mutating > unknown > read-only`, so an unclassifiable segment can never make a sequence look safe). Wired in **after** the `source`/`timeout` runner dispatch so `source venv && cmd` still dispatches to `cmd`; single commands take the identical pre-existing path. The grep-family secret exemption now applies per-segment, so `grep <token>; curl -H <secret>` is correctly destructive. Real-data impact: destructive classifications 525 → 614.
+- **Leading/trailing shell operators surfaced as bogus commands** (`normalize_command`, `build_suggestions`). `normalize_command` now strips leading `\`/`&&`/`||`/`;`/`|` and a trailing `;`, and `build_suggestions` applies the existing `_is_noise_command` filter it had been skipping — eliminating junk allowlist suggestions like `Bash(\ *)`, `Bash(&& *)`, `Bash(while *)`, and the `Bash: true;` display artifact.
+- **Interactive/control builtins inflated prompted-friction stats** (`is_auto_allowed`). `AskUserQuestion`, `Task*`, `EnterPlanMode`, and `ExitPlanMode` are never gated by Claude Code but appeared as the #1 "most prompted" item and as meaningless suggestions everywhere. New `INTERACTIVE_BUILTINS` frozenset treats them as auto-allowed (same mechanism as the existing `Read` special-case). Prompted total corrected 1,837 → 1,602.
+
+### Changed
+
+- **`--generate-settings` exposure wording** clarified. "N secret exposure(s) found" → "N secret-handling command(s) the hook would block", with the literal-exposure subset surfaced separately, so the would-block count (e.g. 473, mostly `$VAR` auth-header references) can't be read as N leaks vs. the 54 literal-secret commands.
+
+### Tests
+
+- **1429 tests across 19 suites** (was 1386). `tests/test_report.py` +21 (`_split_top_level_segments`, sequence max-severity, runner-precedence preservation, operator normalization, interactive-builtin auto-allow, generate-settings wording). Token pattern-sync 10/10.
+
 ## [1.3.1] — 2026-06-20
 
 Residual entropy false-positive fixes (issue #9), closing the shapes the #5/#7 path carve-outs didn't reach. Applied to **both** the report and the hook — their `_is_benign_high_entropy` was identical and shared the same gaps.
