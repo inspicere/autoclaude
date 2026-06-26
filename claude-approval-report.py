@@ -65,6 +65,9 @@ _RE_ENV_PREFIX = re.compile(
     r'^(\w+=(?:\$\(.*?\)|`[^`]*`|\$\{[^}]*\}|"[^"]*"|\'[^\']*\'|\S+)\s+)+'
 )
 _RE_SHELL_OPS = re.compile(r'^[&|;]+\s*')
+# Like _RE_SHELL_OPS but also strips a leading backslash (escaped command such as
+# `\ls`, or a stray line-continuation backslash) so it never groups as a command.
+_RE_LEADING_OPS = re.compile(r'^[\\&|;]+\s*')
 # Backslash line continuation: `\<newline>` should be collapsed to whitespace
 # before prefix-stripping so multi-line scripts classify like their joined form.
 _RE_LINE_CONT = re.compile(r'\\\s*\n\s*')
@@ -358,6 +361,17 @@ READ_ONLY_COMMANDS = {
     "Glob", "Grep",
 }
 
+# Interactive/control builtins that Claude Code never gates behind a permission
+# prompt. They surface as "not auto-allowed" only because they match no allow
+# pattern, which inflates the prompted-friction stats and produces meaningless
+# allowlist suggestions (you cannot allowlist away a question prompt). Treat them
+# as auto-allowed so they're excluded consistently from the most-prompted table,
+# suggestions, and the headline counts.
+INTERACTIVE_BUILTINS = frozenset({
+    "AskUserQuestion", "TaskCreate", "TaskUpdate", "TaskList",
+    "TaskGet", "TaskOutput", "EnterPlanMode", "ExitPlanMode",
+})
+
 # Git subcommands that override the base "mutating" classification
 GIT_DESTRUCTIVE_FLAGS = {
     "push": {"--force", "-f", "--force-with-lease"},
@@ -512,6 +526,79 @@ def _effective_base(cmd, parts, base, depth=0):
     return base
 
 
+# Severity ordering for taking the worst risk across a command sequence. Higher
+# wins. `unknown` outranks `read-only` (an unclassifiable segment must never make
+# a sequence look safe) but ranks below the known write/destroy levels.
+_RISK_SEVERITY = {"read-only": 0, "unknown": 1, "mutating": 2, "destructive": 3}
+
+
+def _max_risk(risks):
+    """Return the highest-severity risk label from an iterable."""
+    return max(risks, key=lambda r: _RISK_SEVERITY.get(r, 1))
+
+
+# Trailing sequence separators (`;`, `&`, `&&`, `||`, `|`) are parsing artifacts
+# for a single command — strip them so `ls;` classifies like `ls`, not `unknown`.
+_RE_TRAILING_SEP = re.compile(r'\s*(?:&&|\|\||[;&|])\s*$')
+
+
+def _split_top_level_segments(cmd):
+    """Split a bash command on top-level `;`, `&&`, `||` separators.
+
+    Respects single/double quotes, `$(...)` / backtick command substitution,
+    `${...}` and `(...)` / `{...}` grouping, and backslash escapes, so separators
+    nested inside them don't split. Single `&` (background) and single `|` (pipe)
+    are NOT split points. Returns a list of non-empty, stripped segment strings —
+    a one-element list when there is no top-level separator.
+    """
+    segments, buf = [], []
+    squote = dquote = backtick = False
+    depth = 0  # (...), {...}, $(...), ${...}
+    i, n = 0, len(cmd)
+    while i < n:
+        c = cmd[i]
+        nxt = cmd[i + 1] if i + 1 < n else ''
+        if squote:
+            buf.append(c)
+            if c == "'":
+                squote = False
+        elif dquote:
+            buf.append(c)
+            if c == '"':
+                dquote = False
+        elif backtick:
+            buf.append(c)
+            if c == '`':
+                backtick = False
+        elif c == '\\' and nxt:
+            buf.append(c); buf.append(nxt); i += 2; continue
+        elif c == "'":
+            squote = True; buf.append(c)
+        elif c == '"':
+            dquote = True; buf.append(c)
+        elif c == '`':
+            backtick = True; buf.append(c)
+        elif c == '$' and nxt in '({':
+            depth += 1; buf.append(c); buf.append(nxt); i += 2; continue
+        elif c in '({':
+            depth += 1; buf.append(c)
+        elif c in ')}':
+            if depth > 0:
+                depth -= 1
+            buf.append(c)
+        elif depth == 0 and c == ';':
+            segments.append(''.join(buf)); buf = []
+        elif depth == 0 and c == '&' and nxt == '&':
+            segments.append(''.join(buf)); buf = []; i += 2; continue
+        elif depth == 0 and c == '|' and nxt == '|':
+            segments.append(''.join(buf)); buf = []; i += 2; continue
+        else:
+            buf.append(c)
+        i += 1
+    segments.append(''.join(buf))
+    return [s.strip() for s in segments if s.strip()]
+
+
 def _classify_bash(raw_cmd, _depth=0):
     """Classify a Bash command, recursing through command-runners (source, timeout).
 
@@ -533,6 +620,9 @@ def _classify_bash(raw_cmd, _depth=0):
     if cmd.startswith('(') and not cmd.startswith('(('):
         cmd = cmd[1:].lstrip()
 
+    # Drop a dangling trailing separator so `ls;` classifies like `ls`.
+    cmd = _RE_TRAILING_SEP.sub('', cmd)
+
     parts = cmd.split()
     if not parts or parts[0].startswith("#"):
         return "read-only"
@@ -549,11 +639,20 @@ def _classify_bash(raw_cmd, _depth=0):
         if _cmd_has_secrets(raw_cmd):
             return "destructive"
 
-    # Command-runners: dispatch to the trailing/underlying command.
+    # Command-runners: dispatch to the trailing/underlying command. Handled
+    # before the generic sequence split so `source venv && cmd` (env activation,
+    # benign) keeps dispatching to `cmd` instead of being max-merged with source.
     if base in ("source", "."):
         return _classify_source_chain(cmd, _depth)
     if base == "timeout":
         return _classify_timeout(parts, _depth)
+
+    # Command sequences: a benign leading command must not mask a dangerous
+    # trailing one. Split on top-level `;`/`&&`/`||` and take the worst risk, so
+    # `true && git push --force` is destructive, not read-only.
+    segments = _split_top_level_segments(cmd)
+    if len(segments) > 1:
+        return _max_risk([_classify_bash(seg, _depth + 1) for seg in segments])
 
     # `$VAR` or `$VAR/path/...` as the base — opaque indirection; almost always
     # invokes a script. Check parts[0] directly; basename strips the $-prefix
@@ -787,6 +886,11 @@ def is_auto_allowed(tool_name, tool_input, allow_patterns):
     if tool_name == "Read":
         return True
 
+    # Interactive/control builtins (AskUserQuestion, Task*, EnterPlanMode, …) are
+    # never gated by Claude Code, so they require no allow pattern.
+    if tool_name in INTERACTIVE_BUILTINS:
+        return True
+
     for pattern in allow_patterns:
         if command_matches_pattern(tool_name, tool_input, pattern):
             return True
@@ -804,15 +908,25 @@ def extract_tool_calls_from_assistant(content):
 
 def normalize_command(cmd, _depth=0):
     """Extract a groupable prefix from a bash command."""
-    cmd = cmd.strip()
+    # Mirror _classify_bash's preamble so line-continuations and leading shell
+    # operators (`\`, `&&`, `||`, `;`, `|`) don't surface as bogus "commands"
+    # like `Bash: \` or `Bash: &&` in the most-prompted / suggestion tables.
+    cmd = _RE_LINE_CONT.sub(' ', cmd).strip()
     cmd = _RE_CD_PREFIX.sub('', cmd)
     cmd = _RE_ENV_PREFIX.sub('', cmd)
+    cmd = _RE_LEADING_OPS.sub('', cmd).lstrip()
+    if cmd.startswith('(') and not cmd.startswith('(('):
+        cmd = cmd[1:].lstrip()
     # Get the base command (first word or two)
     parts = cmd.split()
     if not parts:
         return "(empty)"
 
-    base = parts[0]
+    # Strip a trailing `;` parsing artifact so `true; …` groups as `true`,
+    # not the distinct token `true;`.
+    base = parts[0].rstrip(';')
+    if not base:
+        return "(empty)"
 
     # Skip comment-only lines and shebangs
     if base.startswith("#"):
@@ -2303,6 +2417,8 @@ def build_suggestions(all_records, min_approvals=3):
                 cmd_suffix = cmd.split(": ", 1)[1] if ": " in cmd else cmd
                 if cmd_suffix in skip_patterns:
                     continue
+                if _is_noise_command(cmd):
+                    continue
                 if cmd_suffix.endswith(" [secrets]"):
                     continue
                 pattern = suggest_pattern(cmd)
@@ -2941,7 +3057,15 @@ def render_generate_settings(all_records, out=None):
     if all_records:
         exposures = _find_secret_exposures(all_records)
         if exposures:
-            print(f"\n  Session analysis: {len(exposures)} secret exposure(s) found", file=sys.stderr)
+            # `len(exposures)` is every secret-handling command the hook would
+            # block; only a subset are literal secrets actually written to the
+            # transcript. Report both so the totals can't be read as "N leaks"
+            # (most "auth_header" hits are `$VAR` refs, not exposed values).
+            literal = _count_secret_exposures(all_records)
+            print(f"\n  Session analysis: {len(exposures)} secret-handling command(s) "
+                  f"the hook would block", file=sys.stderr)
+            print(f"    ({literal} contained a literal secret in the transcript; "
+                  f"the rest reference secrets indirectly)", file=sys.stderr)
 
             category_labels = {
                 "token": "Known token patterns",
@@ -2954,12 +3078,12 @@ def render_generate_settings(all_records, out=None):
             by_category = Counter(cat for _, cat in exposures)
             for cat, count in by_category.most_common():
                 label = category_labels.get(cat, cat)
-                print(f"    {label}: {count} (blocked by hook)", file=sys.stderr)
+                print(f"    {label}: {count} (would block)", file=sys.stderr)
 
-            print(f"\n  The PreToolUse hook would have blocked all {len(exposures)} exposure(s).", file=sys.stderr)
+            print(f"\n  The PreToolUse hook would have blocked all {len(exposures)} command(s).", file=sys.stderr)
             print(f"  Deny rules alone cannot prevent embedded secrets in Bash commands.", file=sys.stderr)
         else:
-            print(f"\n  Session analysis: no secret exposures found in analyzed sessions.", file=sys.stderr)
+            print(f"\n  Session analysis: no secret-handling commands found in analyzed sessions.", file=sys.stderr)
     else:
         print(f"\n  No session data analyzed (use --since/--project to include).", file=sys.stderr)
 
